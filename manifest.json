@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+
+  "name": "Internet Map",
+  "version": "0.1.0",
+
+  "description": "브라우저 사용 패턴을 로컬에 기록하고 인터넷 이동 지도로 시각화합니다.",
+
+  "permissions": [
+    "tabs",
+    "storage",
+    "favicon"
+  ],
+
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+
+  "action": {
+    "default_title": "Internet Map"
+  }
+}

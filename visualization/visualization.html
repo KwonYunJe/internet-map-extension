@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+
+<html lang="ko">
+
+<head>
+
+  <meta charset="UTF-8">
+
+
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+  >
+
+
+  <title>
+    Internet Map
+  </title>
+
+
+  <link
+    rel="stylesheet"
+    href="visualization.css"
+  >
+
+</head>
+
+
+<body>
+
+  <!-- ==================================================
+       Header
+       ================================================== -->
+
+  <header id="pageHeader">
+
+    <div class="header-title">
+
+      <h1>
+        Internet Map
+      </h1>
+
+
+      <p>
+        나의 인터넷 이동 지도
+      </p>
+
+    </div>
+
+
+    <!--
+      우측 영역:
+
+      통계 Summary
+      +
+      도움말 버튼
+    -->
+    <div class="header-actions">
+
+      <div id="summary">
+        데이터를 불러오는 중...
+      </div>
+
+
+      <!-- ==================================================
+           Help
+           ================================================== -->
+
+      <div class="help-container">
+
+        <button
+          type="button"
+          class="help-button"
+          aria-label="Internet Map 도움말"
+          aria-describedby="helpTooltip"
+        >
+          ?
+        </button>
+
+
+        <div
+          id="helpTooltip"
+          class="help-tooltip"
+          role="tooltip"
+        >
+
+          <strong>
+            Internet Map
+          </strong>
+
+
+          <p>
+            평소 방문하는 웹사이트와 이동 흐름,
+            머문 시간을 자동으로 기록해
+            나만의 인터넷 지도로 보여줍니다.
+          </p>
+
+
+          <p class="help-tooltip-message">
+            따로 설정할 건 없습니다.<br>
+            그냥 인터넷을 즐기시다가
+            가끔 보러 오시면 돼요!
+          </p>
+
+        </div>
+
+      </div>
+
+    </div>
+
+  </header>
+
+
+  <!-- ==================================================
+       Workspace
+
+       Wide:
+       Detail | Map | Ranking
+
+       Medium:
+       Map
+       Detail | Ranking
+
+       Mobile:
+       Map
+       Detail
+       Ranking
+       ================================================== -->
+
+  <div id="workspace">
+
+    <!-- ==================================================
+         Left Detail Panel
+         ================================================== -->
+
+    <aside
+      id="detail"
+      class="side-panel detail-panel"
+    >
+
+      <div class="panel-eyebrow">
+        사이트 상세정보
+      </div>
+
+
+      <h2>
+        사이트를 선택하세요
+      </h2>
+
+
+      <p class="panel-description">
+        노드를 클릭하면 사용시간과 이동 관계를 볼 수 있습니다.
+      </p>
+
+    </aside>
+
+
+    <!-- ==================================================
+         Network
+         ================================================== -->
+
+    <main id="graphPane">
+
+      <svg
+        id="network"
+        viewBox="0 0 1200 700"
+        preserveAspectRatio="xMidYMid meet"
+        aria-label="인터넷 사용 네트워크"
+      ></svg>
+
+    </main>
+
+
+    <!-- ==================================================
+         Ranking Panel
+         ================================================== -->
+
+    <aside
+      id="ranking"
+      class="side-panel ranking-panel"
+    >
+
+      <div class="panel-eyebrow">
+        Usage Ranking
+      </div>
+
+
+      <h2>
+        이용률 순위
+      </h2>
+
+
+      <p class="panel-description">
+        전체 활성시간에서 각 사이트가 차지한 비율입니다.
+      </p>
+
+
+      <div id="rankingList">
+
+        <div class="ranking-empty">
+          데이터를 계산하는 중입니다.
+        </div>
+
+      </div>
+
+    </aside>
+
+  </div>
+
+
+  <script src="visualization.js"></script>
+
+</body>
+
+</html>
