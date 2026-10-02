@@ -18,6 +18,9 @@
   </title>
 
 
+  <link rel="stylesheet" href="vendor/flatpickr/flatpickr.min.css">
+  <link rel="stylesheet" href="vendor/nouislider/nouislider.min.css">
+
   <link
     rel="stylesheet"
     href="visualization.css"
@@ -48,6 +51,59 @@
     </div>
 
 
+    <!-- ==================================================
+         Period Filter
+         ================================================== -->
+
+    <div
+      id="periodFilter"
+      class="period-filter"
+      role="group"
+      aria-label="인터넷 사용 기간"
+    >
+
+      <button
+        type="button"
+        class="period-filter-button is-active"
+        data-period="today"
+        aria-pressed="true"
+      >
+        오늘
+      </button>
+
+
+      <button
+        type="button"
+        class="period-filter-button"
+        data-period="7days"
+        aria-pressed="false"
+      >
+        7일
+      </button>
+
+
+      <button
+        type="button"
+        class="period-filter-button"
+        data-period="30days"
+        aria-pressed="false"
+      >
+        30일
+      </button>
+
+
+      <button
+        type="button"
+        class="period-filter-button"
+        data-period="all"
+        aria-pressed="false"
+      >
+        전체
+      </button>
+
+    </div>
+
+
     <!--
       우측 영역:
 
@@ -56,6 +112,19 @@
       도움말 버튼
     -->
     <div class="header-actions">
+
+      <details class="data-settings">
+        <summary>설정 · 데이터</summary>
+        <div class="data-settings-menu">
+          <button id="trackingToggle" type="button" disabled>기록 상태 확인 중…</button>
+          <button id="exportData" type="button">JSON 내보내기</button>
+          <button id="importData" type="button">JSON 불러오기</button>
+          <input id="importFile" type="file" accept=".json,application/json" hidden>
+          <p>불러온 기록은 기존 기록과 병합하며 중복은 제외합니다. 원본 기록은 자동 삭제하지 않습니다.</p>
+          <button id="clearData" type="button">전체 기록 초기화</button>
+          <p id="dataStatus" role="status" aria-live="polite"></p>
+        </div>
+      </details>
 
       <div id="summary">
         데이터를 불러오는 중...
@@ -127,6 +196,8 @@
        Ranking
        ================================================== -->
 
+  <section id="historyTools" aria-label="시간순 이동 재생"></section>
+
   <div id="workspace">
 
     <!-- ==================================================
@@ -191,7 +262,7 @@
 
 
       <p class="panel-description">
-        전체 활성시간에서 각 사이트가 차지한 비율입니다.
+        선택 기간의 활성시간에서 각 사이트가 차지한 비율입니다.
       </p>
 
 
@@ -203,11 +274,22 @@
 
       </div>
 
+      <section id="periodComparison" aria-label="이전 기간 비교" aria-live="polite"></section>
+
     </aside>
 
   </div>
 
 
+  <script src="vendor/flatpickr/flatpickr.min.js"></script>
+  <script src="vendor/flatpickr/ko.js"></script>
+  <script src="vendor/nouislider/nouislider.min.js"></script>
+  <script src="site-grouping.js"></script>
+  <script src="map-zoom.js"></script>
+  <script src="data-tools.js"></script>
+  <script src="history-tools.js"></script>
+  <script src="liquid-optics.js"></script>
+  <script src="star-twinkle.js"></script>
   <script src="visualization.js"></script>
 
 </body>

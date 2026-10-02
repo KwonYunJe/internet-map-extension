@@ -10,6 +10,9 @@ const detailElement =
 const rankingListElement =
   document.querySelector("#rankingList");
 
+const periodFilterElement =
+  document.querySelector("#periodFilter");
+
 
 const SVG_NS =
   "http://www.w3.org/2000/svg";
@@ -17,6 +20,39 @@ const SVG_NS =
 
 const WIDTH = 1200;
 const HEIGHT = 700;
+
+const NODE_BUBBLE_TEXTURE_URLS = [
+  "bubble-clean.png"
+].map(filename => chrome.runtime.getURL(`visualization/assets/${filename}`));
+const nodeBubbleTextures = new Map();
+
+function getNodeBubbleTexture(domain) {
+  if (!nodeBubbleTextures.has(domain)) {
+    const index = Math.floor(Math.random() * NODE_BUBBLE_TEXTURE_URLS.length);
+    nodeBubbleTextures.set(domain, NODE_BUBBLE_TEXTURE_URLS[index]);
+  }
+  return nodeBubbleTextures.get(domain);
+}
+
+const NODE_FAVICON_SIZE_MULTIPLIER = 1.3;
+// The supplied PNG has roughly 8% transparent padding on each side.
+const NODE_BUBBLE_SIZE_MULTIPLIER = 2.35;
+
+const NODE_GLOW_TEXTURE_URL =
+  chrome.runtime.getURL(
+    "visualization/assets/node-glow.png"
+  );
+
+
+/*
+ * 생성한 glow 이미지에서
+ * 실제 물방울 테두리와 가장 밝은 부분이 일치하는 크기.
+ *
+ * 이미지 반지름 = 노드 반지름 × 1.6
+ * 이미지 내부 62.5% 지점 = 실제 노드 반지름
+ */
+const NODE_GLOW_SIZE_MULTIPLIER =
+  3.2;
 
 
 // ==================================================
@@ -75,17 +111,6 @@ const LAYOUT_HALF_HEIGHT =
  */
 const LAYOUT_SHAPE_POWER =
   3.2;
-
-
-/*
- * 중요도가 높은 노드는 중심에 가깝게,
- * 중요도가 낮은 노드는 외곽까지 넓게 분산한다.
- */
-const CENTER_MIN_RADIUS_RATIO =
-  0.055;
-
-const CENTER_MAX_RADIUS_RATIO =
-  0.985;
 
 
 /*
@@ -155,13 +180,13 @@ const LABEL_MAX_FONT_SIZE =
 // ==================================================
 
 const EDGE_END_WIDTH =
-  1;
+  3;
 
 const EDGE_WIDTH_PER_TRANSITION =
-  2.5;
+  4;
 
 const EDGE_MAX_START_WIDTH =
-  42;
+  64;
 
 
 // ==================================================
@@ -188,66 +213,350 @@ let pointerDownPoint =
   null;
 
 
+let activePeriodKey =
+  "today";
+
+
+let selectedDomain =
+  null;
+
+
+let layoutPositionMemory =
+  new Map();
+
+
+const PERIODS = {
+
+  today: {
+    label:
+      "오늘",
+
+    days:
+      1
+  },
+
+
+  "7days": {
+    label:
+      "최근 7일",
+
+    days:
+      7
+  },
+
+
+  "30days": {
+    label:
+      "최근 30일",
+
+    days:
+      30
+  },
+
+
+  all: {
+    label:
+      "전체",
+
+    days:
+      null
+  }
+};
+
+
 // ==================================================
 // Data
 // ==================================================
 
-function loadSessions() {
+// ==================================================
+// Period filtering
+// ==================================================
 
-  return new Promise(
-    (
-      resolve,
-      reject
-    ) => {
+function getPeriodRange(
+  periodKey,
+  now = new Date()
+) {
 
-      chrome.runtime.sendMessage(
-        {
-          type:
-            "GET_SESSIONS"
-        },
-
-        response => {
-
-          if (
-            chrome.runtime.lastError
-          ) {
-
-            reject(
-              chrome.runtime.lastError
-            );
-
-            return;
-          }
+  const period =
+    PERIODS[periodKey] ??
+    PERIODS.today;
 
 
-          if (
-            response?.error
-          ) {
+  if (
+    period.days ===
+    null
+  ) {
 
-            reject(
-              new Error(
-                response.error
-              )
-            );
+    return {
+      key:
+        "all",
 
-            return;
-          }
+      label:
+        period.label,
+
+      start:
+        null,
+
+      end:
+        null
+    };
+  }
 
 
-          resolve(
-            response?.sessions ??
-            []
-          );
-        }
-      );
-    }
+  const end =
+    now.getTime();
+
+
+  const startDate =
+    new Date(
+      end
+    );
+
+
+  /*
+   * setHours / setDate를 사용해서 사용자 로컬 시간의
+   * 자정과 일광절약시간 경계를 그대로 따른다.
+   */
+  startDate.setHours(
+    0,
+    0,
+    0,
+    0
   );
+
+
+  startDate.setDate(
+    startDate.getDate()
+    -
+    (
+      period.days -
+      1
+    )
+  );
+
+
+  return {
+    key:
+      periodKey,
+
+    label:
+      period.label,
+
+    start:
+      startDate.getTime(),
+
+    end
+  };
+}
+
+
+function toTimestamp(
+  value
+) {
+
+  if (
+    typeof value ===
+    "number"
+  ) {
+
+    return Number.isFinite(
+      value
+    )
+
+      ? value
+
+      : null;
+  }
+
+
+  const timestamp =
+    Date.parse(
+      value
+    );
+
+
+  return Number.isFinite(
+    timestamp
+  )
+
+    ? timestamp
+
+    : null;
+}
+
+
+function clipSessionsToRange(
+  sessions,
+  range
+) {
+
+  /*
+   * "전체"는 날짜 필터를 적용하지 않는다.
+   * 저장된 duration을 그대로 사용하고, 누락된 경우에만
+   * startedAt / endedAt 차이로 복구한다.
+   */
+  if (
+    range.start ===
+    null
+  ) {
+
+    return sessions.map(
+      session => {
+
+        const startedAt =
+          toTimestamp(
+            session.startedAt
+          );
+
+
+        const endedAt =
+          toTimestamp(
+            session.endedAt
+          );
+
+
+        const derivedDuration =
+          startedAt !==
+            null &&
+          endedAt !==
+            null
+
+            ? Math.max(
+                0,
+                endedAt -
+                startedAt
+              )
+
+            : 0;
+
+
+        return {
+          ...session,
+
+          duration:
+            Number.isFinite(
+              session.duration
+            )
+
+              ? Math.max(
+                  0,
+                  session.duration
+                )
+
+              : derivedDuration
+        };
+      }
+    );
+  }
+
+  const clippedSessions =
+    [];
+
+
+  for (
+    const session
+    of sessions
+  ) {
+
+    const startedAt =
+      toTimestamp(
+        session.startedAt
+      );
+
+
+    const endedAt =
+      toTimestamp(
+        session.endedAt
+      );
+
+
+    /*
+     * 기간 필터는 원본의 startedAt / endedAt을 기준으로 한다.
+     * 날짜가 없는 예전 데이터는 기간을 판별할 수 없으므로 제외한다.
+     */
+    if (
+      startedAt ===
+        null ||
+      endedAt ===
+        null
+    ) {
+
+      continue;
+    }
+
+
+    const sessionStart =
+      Math.min(
+        startedAt,
+        endedAt
+      );
+
+
+    const sessionEnd =
+      Math.max(
+        startedAt,
+        endedAt
+      );
+
+
+    const overlapStart =
+      Math.max(
+        sessionStart,
+        range.start
+      );
+
+
+    const overlapEnd =
+      Math.min(
+        sessionEnd,
+        range.end
+      );
+
+
+    /*
+     * 경계와 실제로 겹친 세션만 포함한다.
+     * 포함된 세션은 방문 / 이동 횟수에는 1회로 집계되고,
+     * 활성시간만 겹친 길이로 잘린다.
+     */
+    if (
+      overlapEnd <=
+      overlapStart
+    ) {
+
+      continue;
+    }
+
+
+    clippedSessions.push({
+      ...session,
+
+      startedAt:
+        overlapStart,
+
+      endedAt:
+        overlapEnd,
+
+      duration:
+        overlapEnd -
+        overlapStart
+    });
+  }
+
+
+  return clippedSessions;
 }
 
 
 // ==================================================
 // Sessions → Graph
 // ==================================================
+
+// Keep raw storage/export intact so grouping rules remain reversible.
+function groupSessionBySite(session) {
+  const domain = getSiteDomain(session.domain);
+  const fromDomain = getSiteDomain(session.fromDomain);
+  return {...session, domain, fromDomain: fromDomain === domain ? null : fromDomain};
+}
 
 function aggregateSessions(
   sessions
@@ -262,9 +571,11 @@ function aggregateSessions(
 
 
   for (
-    const session
+    const rawSession
     of sessions
   ) {
+
+    const session = groupSessionBySite(rawSession);
 
     let node =
       nodeMap.get(
@@ -833,58 +1144,51 @@ function calculateLabelFontSize(
 }
 
 
-function calculatePreferredRadiusRatio(
-  importance
-) {
-
-  /*
-   * 중요도가 높은 노드는 이전보다 더 강하게 중심으로 모은다.
-   *
-   * 반대로 중요도가 낮은 노드는 기존처럼 외곽 공간을
-   * 충분히 사용하도록 importance에 따라 exponent를 바꾼다.
-   */
-  const exponent =
-    0.78
-    +
-    (
-      1 -
-      importance
-    ) *
-    0.45;
-
-
-  const curved =
-    Math.pow(
-      importance,
-      exponent
-    );
-
-
-  return (
-    CENTER_MIN_RADIUS_RATIO
-    +
-    (
-      1 -
-      curved
-    ) *
-    (
-      CENTER_MAX_RADIUS_RATIO -
-      CENTER_MIN_RADIUS_RATIO
-    )
-  );
-}
-
-
 function calculateNodeMobility(
   node
 ) {
+
+  const component =
+    node.layoutComponentRef;
+
+
+  const incidentWeight =
+    node.layoutIncidentWeight ??
+    0;
+
+
+  const componentWeight =
+    component?.edgeWeight ??
+    incidentWeight;
+
+
+  if (
+    componentWeight <=
+    0
+  ) {
+
+    return 0.72;
+  }
+
+
+  const topologyCentrality =
+    Math.min(
+      1,
+
+      incidentWeight /
+      Math.max(
+        componentWeight,
+        1
+      )
+    );
+
 
   return (
     1 /
     (
       1 +
-      node.importance *
-      2.5
+      topologyCentrality *
+      2.35
     )
   );
 }
@@ -988,6 +1292,978 @@ function createLayoutEdges(
 
   return Array.from(
     relationMap.values()
+  );
+}
+
+
+function getSuperellipseBoundaryScale(
+  directionX,
+  directionY
+) {
+
+  const volume =
+    Math.pow(
+      Math.abs(
+        directionX
+      ),
+      LAYOUT_SHAPE_POWER
+    )
+    +
+    Math.pow(
+      Math.abs(
+        directionY
+      ),
+      LAYOUT_SHAPE_POWER
+    );
+
+
+  if (
+    volume <=
+    0
+  ) {
+
+    return 0;
+  }
+
+
+  return Math.pow(
+    volume,
+
+    -1 /
+    LAYOUT_SHAPE_POWER
+  );
+}
+
+
+function getSuperellipsePoint(
+  angle,
+  radiusRatio,
+  inset
+) {
+
+  const centerX =
+    WIDTH /
+    2;
+
+
+  const centerY =
+    HEIGHT /
+    2;
+
+
+  const directionX =
+    Math.cos(
+      angle
+    );
+
+
+  const directionY =
+    Math.sin(
+      angle
+    );
+
+
+  const boundaryScale =
+    getSuperellipseBoundaryScale(
+      directionX,
+      directionY
+    );
+
+
+  const usableHalfWidth =
+    Math.max(
+      40,
+
+      LAYOUT_HALF_WIDTH -
+      inset
+    );
+
+
+  const usableHalfHeight =
+    Math.max(
+      40,
+
+      LAYOUT_HALF_HEIGHT -
+      inset
+    );
+
+
+  return {
+
+    x:
+      centerX
+      +
+      directionX *
+      boundaryScale *
+      usableHalfWidth *
+      radiusRatio,
+
+    y:
+      centerY
+      +
+      directionY *
+      boundaryScale *
+      usableHalfHeight *
+      radiusRatio
+  };
+}
+
+
+function buildLayoutComponents(
+  nodes,
+  layoutEdges,
+  nodeMap
+) {
+
+  const adjacency =
+    new Map(
+      nodes.map(
+        node => [
+          node.domain,
+          []
+        ]
+      )
+    );
+
+
+  for (
+    const node
+    of nodes
+  ) {
+
+    node.layoutIncidentWeight =
+      0;
+  }
+
+
+  for (
+    const edge
+    of layoutEdges
+  ) {
+
+    const source =
+      nodeMap.get(
+        edge.source
+      );
+
+
+    const target =
+      nodeMap.get(
+        edge.target
+      );
+
+
+    if (
+      !source ||
+      !target
+    ) {
+
+      continue;
+    }
+
+
+    adjacency
+      .get(
+        edge.source
+      )
+      .push({
+        domain:
+          edge.target,
+
+        count:
+          edge.count
+      });
+
+
+    adjacency
+      .get(
+        edge.target
+      )
+      .push({
+        domain:
+          edge.source,
+
+        count:
+          edge.count
+      });
+
+
+    source.layoutIncidentWeight +=
+      edge.count;
+
+
+    target.layoutIncidentWeight +=
+      edge.count;
+  }
+
+
+  const visited =
+    new Set();
+
+
+  const components =
+    [];
+
+
+  for (
+    const node
+    of nodes
+  ) {
+
+    if (
+      visited.has(
+        node.domain
+      )
+    ) {
+
+      continue;
+    }
+
+
+    const stack =
+      [
+        node.domain
+      ];
+
+
+    const componentNodes =
+      [];
+
+
+    visited.add(
+      node.domain
+    );
+
+
+    while (
+      stack.length >
+      0
+    ) {
+
+      const domain =
+        stack.pop();
+
+
+      const currentNode =
+        nodeMap.get(
+          domain
+        );
+
+
+      if (
+        !currentNode
+      ) {
+
+        continue;
+      }
+
+
+      componentNodes.push(
+        currentNode
+      );
+
+
+      for (
+        const neighbor
+        of adjacency.get(
+          domain
+        ) ?? []
+      ) {
+
+        if (
+          visited.has(
+            neighbor.domain
+          )
+        ) {
+
+          continue;
+        }
+
+
+        visited.add(
+          neighbor.domain
+        );
+
+
+        stack.push(
+          neighbor.domain
+        );
+      }
+    }
+
+
+    const nodeDomains =
+      new Set(
+        componentNodes.map(
+          componentNode =>
+            componentNode.domain
+        )
+      );
+
+
+    const componentEdges =
+      layoutEdges.filter(
+        edge =>
+          nodeDomains.has(
+            edge.source
+          )
+          &&
+          nodeDomains.has(
+            edge.target
+          )
+      );
+
+
+    const edgeWeight =
+      componentEdges.reduce(
+        (
+          sum,
+          edge
+        ) =>
+          sum +
+          edge.count,
+
+        0
+      );
+
+
+    const radius =
+      Math.max(
+        44,
+
+        Math.sqrt(
+          componentNodes.reduce(
+            (
+              sum,
+              componentNode
+            ) =>
+              sum
+              +
+              Math.pow(
+                componentNode.radius +
+                34,
+                2
+              ),
+
+            0
+          )
+        ) *
+        (
+          componentNodes.length ===
+          1
+
+            ? 0.9
+
+            : 1.12
+        )
+      );
+
+
+    const id =
+      componentNodes
+        .map(
+          componentNode =>
+            componentNode.domain
+        )
+        .sort()
+        .join(
+          "|"
+        );
+
+
+    const component = {
+
+      id,
+
+      nodes:
+        componentNodes,
+
+      edges:
+        componentEdges,
+
+      edgeWeight,
+
+      radius,
+
+      centerX:
+        WIDTH /
+        2,
+
+      centerY:
+        HEIGHT /
+        2,
+
+      isIsolated:
+        edgeWeight ===
+        0
+    };
+
+
+    for (
+      const componentNode
+      of componentNodes
+    ) {
+
+      componentNode.layoutComponent =
+        component.id;
+
+
+      componentNode.layoutComponentRef =
+        component;
+    }
+
+
+    components.push(
+      component
+    );
+  }
+
+
+  return components;
+}
+
+
+function rankLayoutComponents(
+  components
+) {
+
+  return [...components].sort(
+    (
+      a,
+      b
+    ) => {
+
+      if (
+        a.isIsolated !==
+        b.isIsolated
+      ) {
+
+        return a.isIsolated
+
+          ? 1
+
+          : -1;
+      }
+
+
+      if (
+        b.edgeWeight !==
+        a.edgeWeight
+      ) {
+
+        return b.edgeWeight -
+          a.edgeWeight;
+      }
+
+
+      if (
+        b.nodes.length !==
+        a.nodes.length
+      ) {
+
+        return b.nodes.length -
+          a.nodes.length;
+      }
+
+
+      const aImportance =
+        a.nodes.reduce(
+          (
+            sum,
+            node
+          ) =>
+            sum +
+            node.importance,
+
+          0
+        );
+
+
+      const bImportance =
+        b.nodes.reduce(
+          (
+            sum,
+            node
+          ) =>
+            sum +
+            node.importance,
+
+          0
+        );
+
+
+      if (
+        bImportance !==
+        aImportance
+      ) {
+
+        return bImportance -
+          aImportance;
+      }
+
+
+      return domainHash(
+        a.id
+      )
+      -
+      domainHash(
+        b.id
+      );
+    }
+  );
+}
+
+
+function calculateComponentOverlapPenalty(
+  candidate,
+  placedComponents,
+  component
+) {
+
+  let penalty =
+    0;
+
+
+  for (
+    const placed
+    of placedComponents
+  ) {
+
+    const dx =
+      candidate.x -
+      placed.centerX;
+
+
+    const dy =
+      candidate.y -
+      placed.centerY;
+
+
+    const distance =
+      Math.max(
+        Math.sqrt(
+          dx * dx +
+          dy * dy
+        ),
+
+        1
+      );
+
+
+    const minimumDistance =
+      component.radius
+      +
+      placed.radius
+      +
+      46;
+
+
+    if (
+      distance <
+      minimumDistance
+    ) {
+
+      penalty +=
+        Math.pow(
+          minimumDistance -
+          distance,
+          2
+        ) *
+        12;
+    }
+
+
+    penalty +=
+      1200 /
+      distance;
+  }
+
+
+  return penalty;
+}
+
+
+function createComponentCenterCandidates(
+  component,
+  orderedIndex,
+  totalCount
+) {
+
+  const candidates =
+    [];
+
+
+  if (
+    orderedIndex ===
+    0
+    &&
+    (
+      !component.isIsolated
+      ||
+      totalCount ===
+      1
+    )
+  ) {
+
+    candidates.push({
+
+      x:
+        WIDTH /
+        2,
+
+      y:
+        HEIGHT /
+        2,
+
+      ratio:
+        0
+    });
+  }
+
+
+  const baseAngle =
+    domainHash(
+      `${component.id}:component-angle`
+    ) *
+    Math.PI *
+    2;
+
+
+  const rings =
+    component.isIsolated
+
+      ? [
+          0.72,
+          0.84,
+          0.94,
+          0.62
+        ]
+
+      : [
+          0.22,
+          0.38,
+          0.54,
+          0.70,
+          0.84
+        ];
+
+
+  for (
+    let ringIndex = 0;
+    ringIndex < rings.length;
+    ringIndex++
+  ) {
+
+    const ratio =
+      rings[ringIndex];
+
+
+    const slots =
+      Math.max(
+        8,
+
+        Math.ceil(
+          totalCount *
+          (
+            ringIndex +
+            1
+          ) *
+          1.45
+        )
+      );
+
+
+    for (
+      let slot = 0;
+      slot < slots;
+      slot++
+    ) {
+
+      const angle =
+        baseAngle
+        +
+        (
+          slot /
+          slots
+        ) *
+        Math.PI *
+        2
+        +
+        ringIndex *
+        0.37;
+
+
+      candidates.push({
+        ...getSuperellipsePoint(
+          angle,
+          ratio,
+          component.radius +
+            28
+        ),
+
+        ratio
+      });
+    }
+  }
+
+
+  return candidates;
+}
+
+
+function packLayoutComponents(
+  components
+) {
+
+  const orderedComponents =
+    rankLayoutComponents(
+      components
+    );
+
+
+  const placedComponents =
+    [];
+
+
+  for (
+    let orderedIndex = 0;
+    orderedIndex < orderedComponents.length;
+    orderedIndex++
+  ) {
+
+    const component =
+      orderedComponents[orderedIndex];
+
+
+    const candidates =
+      createComponentCenterCandidates(
+        component,
+        orderedIndex,
+        orderedComponents.length
+      );
+
+
+    let bestCandidate =
+      candidates[0] ?? {
+        x:
+          WIDTH /
+          2,
+
+        y:
+          HEIGHT /
+          2,
+
+        ratio:
+          0
+      };
+
+
+    let bestScore =
+      Infinity;
+
+
+    const desiredRatio =
+      orderedComponents.length ===
+      1
+
+        ? 0
+
+        : component.isIsolated
+
+          ? 0.84
+
+          : Math.min(
+              0.62,
+
+              0.18 +
+              orderedIndex *
+              0.08
+            );
+
+
+    for (
+      const candidate
+      of candidates
+    ) {
+
+      const overlapPenalty =
+        calculateComponentOverlapPenalty(
+          candidate,
+          placedComponents,
+          component
+        );
+
+
+      const centerBias =
+        Math.pow(
+          candidate.ratio -
+          desiredRatio,
+          2
+        ) *
+        (
+          component.isIsolated
+
+            ? 900
+
+            : 420
+        );
+
+
+      const score =
+        overlapPenalty +
+        centerBias;
+
+
+      if (
+        score <
+        bestScore
+      ) {
+
+        bestScore =
+          score;
+
+
+        bestCandidate =
+          candidate;
+      }
+    }
+
+
+    component.centerX =
+      bestCandidate.x;
+
+
+    component.centerY =
+      bestCandidate.y;
+
+
+    placedComponents.push(
+      component
+    );
+  }
+}
+
+
+function initializeNodeLayoutPosition(
+  node,
+  component
+) {
+
+  const rememberedPosition =
+    layoutPositionMemory.get(
+      node.domain
+    );
+
+
+  const angle =
+    domainHash(
+      `${node.domain}:layout-angle`
+    ) *
+    Math.PI *
+    2;
+
+
+  const topologyRatio =
+    component.nodes.length ===
+    1
+
+      ? 0
+
+      : 0.18
+        +
+        (
+          1 -
+          Math.min(
+            1,
+            node.layoutIncidentWeight /
+              Math.max(
+                component.edgeWeight,
+                1
+              )
+          )
+        ) *
+        0.52;
+
+
+  const localRadius =
+    component.radius *
+    topologyRatio *
+    (
+      0.62
+      +
+      domainHash(
+        `${node.domain}:layout-radius`
+      ) *
+      0.38
+    );
+
+
+  const seededX =
+    component.centerX
+    +
+    Math.cos(
+      angle
+    ) *
+    localRadius;
+
+
+  const seededY =
+    component.centerY
+    +
+    Math.sin(
+      angle
+    ) *
+    localRadius;
+
+
+  if (
+    rememberedPosition
+  ) {
+
+    node.x =
+      rememberedPosition.x *
+      0.62
+      +
+      seededX *
+      0.38;
+
+
+    node.y =
+      rememberedPosition.y *
+      0.62
+      +
+      seededY *
+      0.38;
+
+  } else {
+
+    node.x =
+      seededX;
+
+
+    node.y =
+      seededY;
+  }
+
+
+  node.z =
+    0;
+
+
+  node.vx =
+    0;
+
+
+  node.vy =
+    0;
+
+
+  node.vz =
+    0;
+
+
+  constrainNodeToLayoutVolume(
+    node
   );
 }
 
@@ -1122,143 +2398,20 @@ function constrainNodeToLayoutVolume(
 }
 
 
-// ==================================================
-// Force Layout
-// ==================================================
-
-function createForceLayout(
-  nodes,
-  edges
+function assignVisualDepth(
+  nodes
 ) {
 
-  if (
-    nodes.length ===
-    0
-  ) {
-
-    return;
-  }
-
-
-  const centerX =
-    WIDTH /
-    2;
-
-
-  const centerY =
-    HEIGHT /
-    2;
-
-
-  calculateNodeImportance(
-    nodes,
-    edges
-  );
-
-
   for (
     const node
     of nodes
   ) {
-
-    node.radius =
-      calculateNodeRadius(
-        node.importance
-      );
-
-
-    node.labelFontSize =
-      calculateLabelFontSize(
-        node.importance
-      );
-  }
-
-
-  // ==================================================
-  // Initial position
-  // ==================================================
-
-  for (
-    const node
-    of nodes
-  ) {
-
-    const angle =
-      domainHash(
-        `${node.domain}:layout-angle`
-      ) *
-      Math.PI *
-      2;
-
-
-    const radiusRatio =
-      calculatePreferredRadiusRatio(
-        node.importance
-      );
-
-
-    /*
-     * 초기 위치부터 superellipse의 방향별 경계를 사용한다.
-     *
-     * 따라서 첫 배치부터 ellipse 안쪽에만 모이지 않고
-     * 캔버스 좌우 / 코너 영역을 더 적극적으로 활용한다.
-     */
-    const directionX =
-      Math.cos(
-        angle
-      );
-
-
-    const directionY =
-      Math.sin(
-        angle
-      );
-
-
-    const boundaryScale =
-      Math.pow(
-        Math.pow(
-          Math.abs(
-            directionX
-          ),
-          LAYOUT_SHAPE_POWER
-        )
-        +
-        Math.pow(
-          Math.abs(
-            directionY
-          ),
-          LAYOUT_SHAPE_POWER
-        ),
-
-        -1 /
-        LAYOUT_SHAPE_POWER
-      );
-
-
-    node.x =
-      centerX
-      +
-      directionX *
-      boundaryScale *
-      LAYOUT_HALF_WIDTH *
-      radiusRatio;
-
-
-    node.y =
-      centerY
-      +
-      directionY *
-      boundaryScale *
-      LAYOUT_HALF_HEIGHT *
-      radiusRatio;
-
 
     node.z =
       Z_MIN
       +
       domainHash(
-        node.domain
+        `${node.domain}:z`
       ) *
       (
         Z_MAX -
@@ -1266,52 +2419,29 @@ function createForceLayout(
       );
 
 
-    node.vx =
-      0;
-
-    node.vy =
-      0;
-
     node.vz =
       0;
-
-
-    constrainNodeToLayoutVolume(
-      node
-    );
   }
+}
 
 
-  const nodeMap =
-    new Map(
-      nodes.map(
-        node => [
-          node.domain,
-          node
-        ]
-      )
-    );
+function resolveFinalNodeCollisions(
+  nodes
+) {
 
-
-  const layoutEdges =
-    createLayoutEdges(
-      edges
-    );
-
-
-  const iterations =
-    700;
+  const maxPasses =
+    90;
 
 
   for (
-    let iteration = 0;
-    iteration < iterations;
-    iteration++
+    let pass = 0;
+    pass < maxPasses;
+    pass++
   ) {
 
-    // ==================================================
-    // Repulsion
-    // ==================================================
+    let largestOverlap =
+      0;
+
 
     for (
       let i = 0;
@@ -1343,20 +2473,310 @@ function createForceLayout(
           a.y;
 
 
-        let dz =
+        let distance =
+          Math.sqrt(
+            dx * dx +
+            dy * dy
+          );
+
+
+        if (
+          distance <
+          0.001
+        ) {
+
+          const angle =
+            domainHash(
+              `${a.domain}|${b.domain}:collision`
+            ) *
+            Math.PI *
+            2;
+
+
+          dx =
+            Math.cos(
+              angle
+            );
+
+
+          dy =
+            Math.sin(
+              angle
+            );
+
+
+          distance =
+            1;
+        }
+
+
+        const minimumDistance =
+          a.radius
+          +
+          b.radius
+          +
           (
-            b.z -
-            a.z
-          ) *
-          3;
+            a.layoutComponent ===
+            b.layoutComponent
+
+              ? 32
+
+              : 48
+          );
+
+
+        const overlap =
+          minimumDistance -
+          distance;
+
+
+        if (
+          overlap <=
+          0
+        ) {
+
+          continue;
+        }
+
+
+        largestOverlap =
+          Math.max(
+            largestOverlap,
+            overlap
+          );
+
+
+        const directionX =
+          dx /
+          distance;
+
+
+        const directionY =
+          dy /
+          distance;
+
+
+        const mobilityA =
+          calculateNodeMobility(
+            a
+          );
+
+
+        const mobilityB =
+          calculateNodeMobility(
+            b
+          );
+
+
+        const totalMobility =
+          Math.max(
+            mobilityA +
+            mobilityB,
+            0.001
+          );
+
+
+        const moveA =
+          overlap *
+          (
+            mobilityA /
+            totalMobility
+          );
+
+
+        const moveB =
+          overlap *
+          (
+            mobilityB /
+            totalMobility
+          );
+
+
+        a.x -=
+          directionX *
+          moveA;
+
+
+        a.y -=
+          directionY *
+          moveA;
+
+
+        b.x +=
+          directionX *
+          moveB;
+
+
+        b.y +=
+          directionY *
+          moveB;
+      }
+    }
+
+
+    for (
+      const node
+      of nodes
+    ) {
+
+      constrainNodeToLayoutVolume(
+        node
+      );
+    }
+
+
+    if (
+      largestOverlap <
+      0.05
+    ) {
+
+      break;
+    }
+  }
+}
+
+
+// ==================================================
+// Force Layout
+// ==================================================
+
+function createComponentForceLayout(
+  nodes,
+  edges
+) {
+
+  if (
+    nodes.length ===
+    0
+  ) {
+
+    return;
+  }
+
+
+  calculateNodeImportance(
+    nodes,
+    edges
+  );
+
+
+  for (
+    const node
+    of nodes
+  ) {
+
+    node.radius =
+      calculateNodeRadius(
+        node.importance
+      );
+
+
+    node.labelFontSize =
+      calculateLabelFontSize(
+        node.importance
+      );
+  }
+
+
+  const nodeMap =
+    new Map(
+      nodes.map(
+        node => [
+          node.domain,
+          node
+        ]
+      )
+    );
+
+
+  const layoutEdges =
+    createLayoutEdges(
+      edges
+    );
+
+
+  const components =
+    buildLayoutComponents(
+      nodes,
+      layoutEdges,
+      nodeMap
+    );
+
+
+  packLayoutComponents(
+    components
+  );
+
+
+  for (
+    const node
+    of nodes
+  ) {
+
+    initializeNodeLayoutPosition(
+      node,
+      node.layoutComponentRef
+    );
+  }
+
+
+  const iterations =
+    680;
+
+
+  for (
+    let iteration = 0;
+    iteration < iterations;
+    iteration++
+  ) {
+
+    // ==================================================
+    // Intra-component repulsion
+    // ==================================================
+
+    for (
+      let i = 0;
+      i < nodes.length;
+      i++
+    ) {
+
+      for (
+        let j = i + 1;
+        j < nodes.length;
+        j++
+      ) {
+
+        const a =
+          nodes[i];
+
+
+        const b =
+          nodes[j];
+
+
+        if (
+          a.layoutComponent !==
+          b.layoutComponent
+        ) {
+
+          continue;
+        }
+
+
+        let dx =
+          b.x -
+          a.x;
+
+
+        let dy =
+          b.y -
+          a.y;
 
 
         let distanceSquared =
           dx * dx
           +
-          dy * dy
-          +
-          dz * dz;
+          dy * dy;
 
 
         if (
@@ -1367,10 +2787,8 @@ function createForceLayout(
           dx =
             1;
 
-          dy =
-            0;
 
-          dz =
+          dy =
             0;
 
 
@@ -1395,9 +2813,9 @@ function createForceLayout(
 
         const force =
           (
-            19000 +
+            16000 +
             sizeFactor *
-            170
+            150
           ) /
           distanceSquared;
 
@@ -1416,17 +2834,6 @@ function createForceLayout(
             distance
           ) *
           force;
-
-
-        const fz =
-          (
-            (
-              dz /
-              distance
-            ) *
-            force
-          ) /
-          3;
 
 
         const mobilityA =
@@ -1451,11 +2858,6 @@ function createForceLayout(
           mobilityA;
 
 
-        a.vz -=
-          fz *
-          mobilityA;
-
-
         b.vx +=
           fx *
           mobilityB;
@@ -1464,17 +2866,12 @@ function createForceLayout(
         b.vy +=
           fy *
           mobilityB;
-
-
-        b.vz +=
-          fz *
-          mobilityB;
       }
     }
 
 
     // ==================================================
-    // Spring
+    // Intra-component springs
     // ==================================================
 
     for (
@@ -1513,22 +2910,12 @@ function createForceLayout(
         source.y;
 
 
-      const dz =
-        (
-          target.z -
-          source.z
-        ) *
-        3;
-
-
       const distance =
         Math.max(
           Math.sqrt(
             dx * dx
             +
             dy * dy
-            +
-            dz * dz
           ),
 
           1
@@ -1543,7 +2930,7 @@ function createForceLayout(
           ) *
           20,
 
-          65
+          70
         );
 
 
@@ -1552,19 +2939,19 @@ function createForceLayout(
         +
         target.radius
         +
-        120
+        118
         -
         relationshipBonus;
 
 
       const strength =
-        0.003
+        0.0034
         +
         Math.min(
           edge.count,
           12
         ) *
-        0.001;
+        0.0011;
 
 
       const force =
@@ -1591,17 +2978,6 @@ function createForceLayout(
         force;
 
 
-      const fz =
-        (
-          (
-            dz /
-            distance
-          ) *
-          force
-        ) /
-        3;
-
-
       const sourceMobility =
         calculateNodeMobility(
           source
@@ -1624,11 +3000,6 @@ function createForceLayout(
         sourceMobility;
 
 
-      source.vz +=
-        fz *
-        sourceMobility;
-
-
       target.vx -=
         fx *
         targetMobility;
@@ -1637,16 +3008,11 @@ function createForceLayout(
       target.vy -=
         fy *
         targetMobility;
-
-
-      target.vz -=
-        fz *
-        targetMobility;
     }
 
 
     // ==================================================
-    // Collision
+    // 2D collision
     // ==================================================
 
     for (
@@ -1704,30 +3070,19 @@ function createForceLayout(
         }
 
 
-        const baseMinimum =
+        const minimumDistance =
           a.radius
           +
           b.radius
           +
-          26;
+          (
+            a.layoutComponent ===
+            b.layoutComponent
 
+              ? 28
 
-        const depthRelief =
-          Math.min(
-            Math.abs(
-              a.z -
-              b.z
-            ) *
-            0.65,
-
-            baseMinimum *
-            0.25
+              : 44
           );
-
-
-        const minimumDistance =
-          baseMinimum -
-          depthRelief;
 
 
         if (
@@ -1742,7 +3097,7 @@ function createForceLayout(
 
           const push =
             overlap *
-            0.10;
+            0.115;
 
 
           const fx =
@@ -1797,7 +3152,7 @@ function createForceLayout(
 
 
     // ==================================================
-    // Canvas-wide superellipse center attraction
+    // Component center attraction
     // ==================================================
 
     for (
@@ -1805,145 +3160,48 @@ function createForceLayout(
       of nodes
     ) {
 
-      const dx =
-        node.x -
-        centerX;
+      const component =
+        node.layoutComponentRef;
 
 
-      const dy =
-        node.y -
-        centerY;
+      if (
+        !component
+      ) {
+
+        continue;
+      }
 
 
-      /*
-       * 캔버스 비율에 맞춰 정규화한 좌표.
-       */
-      const normalizedX =
-        dx /
-        LAYOUT_HALF_WIDTH;
+      const componentStrength =
+        component.isIsolated
 
+          ? 0.0048
 
-      const normalizedY =
-        dy /
-        LAYOUT_HALF_HEIGHT;
-
-
-      const normalizedDistance =
-        Math.max(
-          Math.sqrt(
-            normalizedX *
-            normalizedX
+          : 0.0016
             +
-            normalizedY *
-            normalizedY
-          ),
-
-          0.0001
-        );
-
-
-      /*
-       * 현재 방향을 유지한다.
-       */
-      const directionX =
-        normalizedX /
-        normalizedDistance;
-
-
-      const directionY =
-        normalizedY /
-        normalizedDistance;
-
-
-      /*
-       * 이 방향에서 superellipse 경계까지 도달하기 위한
-       * scale을 계산한다.
-       *
-       * |tx|^p + |ty|^p = 1
-       */
-      const boundaryScale =
-        Math.pow(
-          Math.pow(
-            Math.abs(
-              directionX
-            ),
-            LAYOUT_SHAPE_POWER
-          )
-          +
-          Math.pow(
-            Math.abs(
-              directionY
-            ),
-            LAYOUT_SHAPE_POWER
-          ),
-
-          -1 /
-          LAYOUT_SHAPE_POWER
-        );
-
-
-      const preferredRatio =
-        calculatePreferredRadiusRatio(
-          node.importance
-        );
-
-
-      /*
-       * 중요도가 낮은 노드는 outer volume까지,
-       * 중요도가 높은 노드는 중심에 가깝게.
-       */
-      const targetX =
-        centerX
-        +
-        directionX *
-        boundaryScale *
-        LAYOUT_HALF_WIDTH *
-        preferredRatio;
-
-
-      const targetY =
-        centerY
-        +
-        directionY *
-        boundaryScale *
-        LAYOUT_HALF_HEIGHT *
-        preferredRatio;
-
-
-      /*
-       * 외곽 노드들이 넓어진 캔버스 영역을
-       * 실제로 사용하도록 기본 복원력을 높인다.
-       */
-      const centerStrength =
-        0.00135
-        +
-        node.importance *
-        0.0015;
+            Math.min(
+              node.layoutIncidentWeight,
+              12
+            ) *
+            0.00012;
 
 
       node.vx +=
         (
-          targetX -
+          component.centerX -
           node.x
         ) *
-        centerStrength;
+        componentStrength;
 
 
       node.vy +=
         (
-          targetY -
+          component.centerY -
           node.y
         ) *
-        centerStrength;
+        componentStrength;
 
 
-      /*
-       * z는 기존처럼 얕은 깊이 범위의 중앙을 향해
-       * 아주 약하게 안정화한다.
-       */
-      node.vz +=
-        -node.z *
-        0.001;
     }
 
 
@@ -1964,10 +3222,6 @@ function createForceLayout(
         0.84;
 
 
-      node.vz *=
-        0.84;
-
-
       node.x +=
         node.vx;
 
@@ -1976,15 +3230,38 @@ function createForceLayout(
         node.vy;
 
 
-      node.z +=
-        node.vz;
-
-
       constrainNodeToLayoutVolume(
         node
       );
     }
   }
+
+
+  resolveFinalNodeCollisions(
+    nodes
+  );
+
+
+  assignVisualDepth(
+    nodes
+  );
+
+
+  layoutPositionMemory =
+    new Map(
+      nodes.map(
+        node => [
+          node.domain,
+          {
+            x:
+              node.x,
+
+            y:
+              node.y
+          }
+        ]
+      )
+    );
 }
 
 
@@ -2055,109 +3332,18 @@ function projectNodes(
   }
 
 
-  /*
-   * 시각적으로 가장 중요한 상위 3개 노드의 중심을
-   * 실제 캔버스 중앙과 맞춘다.
-   *
-   * 내부 force-layout 자체를 억지로 고정하지 않고
-   * 최종 투영 결과 전체를 같은 만큼 이동시키므로
-   * 기존 edge 관계와 전체 그래프 형태는 그대로 유지된다.
-   */
-  const coreNodes =
-    [...nodes]
-      .sort(
-        (
-          a,
-          b
-        ) =>
-          b.importance -
-          a.importance
-      )
-      .slice(
-        0,
-        Math.min(
-          3,
-          nodes.length
-        )
-      );
-
-
-  let coreWeightTotal =
-    0;
-
-  let coreCenterX =
-    0;
-
-  let coreCenterY =
-    0;
-
-
-  for (
-    const node
-    of coreNodes
-  ) {
-
-    /*
-     * 가장 큰 노드가 중심 계산에 조금 더 큰 영향력을 갖는다.
-     */
-    const weight =
-      1
-      +
-      node.importance *
-      2;
-
-
-    coreWeightTotal +=
-      weight;
-
-
-    coreCenterX +=
-      node.projectedX *
-      weight;
-
-
-    coreCenterY +=
-      node.projectedY *
-      weight;
-  }
-
-
-  if (
-    coreWeightTotal >
-    0
-  ) {
-
-    coreCenterX /=
-      coreWeightTotal;
-
-
-    coreCenterY /=
-      coreWeightTotal;
-  } else {
-
-    coreCenterX =
-      centerX;
-
-
-    coreCenterY =
-      centerY;
-  }
-
-
   const visualShiftX =
-    centerX -
-    coreCenterX;
+    0;
 
 
   const visualShiftY =
-    centerY -
-    coreCenterY;
+    0;
 
 
   /*
    * 2차 projection.
    *
-   * core cluster를 중앙으로 옮긴 뒤
+   * 컴포넌트 패킹으로 계산된 위치를 유지한 뒤
    * hover 최대 크기와 glow까지 고려해서
    * 모든 노드를 최종 screen-space 안에 제한한다.
    */
@@ -2381,157 +3567,148 @@ function calculateEdgeStartWidth(
 }
 
 
-function createTaperedRibbonPath(
-  source,
-  target,
-  startWidth,
-  endWidth =
-    EDGE_END_WIDTH
-) {
+function syncEdgeGlass(pair) { updateBridgeLens(pair); }
 
-  const sx =
-    source.renderX ??
-    source.screenX;
+function createMapBackgroundImage() {
+  const image = createSvgElement("image");
+  image.setAttribute("href", chrome.runtime.getURL("visualization/assets/background.png"));
+  image.setAttribute("x", "0");
+  image.setAttribute("y", "0");
+  image.setAttribute("width", WIDTH);
+  image.setAttribute("height", HEIGHT);
+  image.setAttribute("preserveAspectRatio", "xMidYMid slice");
+  image.setAttribute("pointer-events", "none");
+  image.setAttribute("data-map-background", "");
+  positionMapBackground(image);
+  return image;
+}
 
-
-  const sy =
-    source.renderY ??
-    source.screenY;
-
-
-  const tx =
-    target.renderX ??
-    target.screenX;
-
-
-  const ty =
-    target.renderY ??
-    target.screenY;
-
-
-  const sourceRadius =
-    source.renderRadius ??
-    source.screenRadius;
-
-
-  const targetRadius =
-    target.renderRadius ??
-    target.screenRadius;
-
-
-  const dx =
-    tx -
-    sx;
-
-
-  const dy =
-    ty -
-    sy;
-
-
-  const distance =
-    Math.sqrt(
-      dx * dx +
-      dy * dy
-    );
-
-
-  if (
-    distance <
-    1
-  ) {
-
-    return "";
+function updateEdgeGelMaterial(pair) {
+  if (!pair.aToB || !pair.bToA) {
+    const forward = pair.aToB > 0;
+    pair.gelElement.setAttribute("d", createTaperedRibbonPath(
+      forward ? pair.nodeA : pair.nodeB,
+      forward ? pair.nodeB : pair.nodeA,
+      calculateEdgeStartWidth(forward ? pair.aToB : pair.bToA)
+    ));
+    return;
   }
+  const a = pair.nodeA, b = pair.nodeB;
+  const ax = a.renderX ?? a.screenX, ay = a.renderY ?? a.screenY;
+  const bx = b.renderX ?? b.screenX, by = b.renderY ?? b.screenY;
+  const ar = a.renderRadius ?? a.screenRadius, br = b.renderRadius ?? b.screenRadius;
+  const distance = Math.hypot(bx - ax, by - ay);
+  const gap = distance - ar - br;
+  if (!Number.isFinite(gap) || gap <= 1) { pair.gelElement.setAttribute("d", ""); return; }
+  const ux = (bx - ax) / distance, uy = (by - ay) / distance;
+  const compact = 1 / (1 + gap / Math.max(1, (ar + br) * 0.7));
+  const ah = Math.min((calculateEdgeStartWidth(pair.aToB) + ar * 0.4) * (1 + 0.35 * compact) / 2, ar * 0.65);
+  const bh = Math.min((calculateEdgeStartWidth(pair.bToA) + br * 0.4) * (1 + 0.35 * compact) / 2, br * 0.65);
+  const ao = Math.sqrt(Math.max(0, ar * ar - ah * ah)) - 0.5;
+  const bo = Math.sqrt(Math.max(0, br * br - bh * bh)) - 0.5;
+  const length = distance - ao - bo;
+  let seed = 0;
+  for (const char of [pair.a, pair.b].sort().join("|")) seed = (Math.imul(seed, 31) + char.charCodeAt(0)) >>> 0;
+  const bend = ((seed % 101) / 50 - 1) * Math.min(6, gap * 0.025);
+  const neck = Math.max(1.2, Math.min(ah, bh) * (0.12 + compact * 0.32));
+  const p = (t, width) => `${ax + ux * (ao + length * t) - uy * width} ${ay + uy * (ao + length * t) + ux * width}`;
+  // One continuous outline. Matching tangents at the waist remove the union cusp.
+  pair.gelElement.setAttribute("d", `M ${p(0, ah)}
+    C ${p(0.12, ah * 0.32)} ${p(0.36, bend + neck)} ${p(0.5, bend + neck)}
+    C ${p(0.64, bend + neck)} ${p(0.88, bh * 0.32)} ${p(1, bh)}
+    L ${p(1, -bh)}
+    C ${p(0.88, -bh * 0.32)} ${p(0.64, bend - neck)} ${p(0.5, bend - neck)}
+    C ${p(0.36, bend - neck)} ${p(0.12, -ah * 0.32)} ${p(0, -ah)} Z`);
+}
 
+function calculateSimpleEdgeWidth(count) {
+  // Absolute logarithmic scale keeps rare links fine and busy links bounded.
+  return Math.min(2.2, 0.8 + 0.28 * Math.log2(Math.max(1, count)));
+}
 
-  const ux =
-    dx /
-    distance;
+function updateEdgeHover(domain) {
+  svg.querySelectorAll(".edge-pair").forEach(group => {
+    group.classList.toggle("edge-hovered",
+      domain != null && (group.dataset.a === domain || group.dataset.b === domain));
+  });
+}
 
+function createSimpleEdgePath(source, target) {
+  const sx = source.renderX ?? source.screenX;
+  const sy = source.renderY ?? source.screenY;
+  const tx = target.renderX ?? target.screenX;
+  const ty = target.renderY ?? target.screenY;
+  const sr = source.renderRadius ?? source.screenRadius;
+  const tr = target.renderRadius ?? target.screenRadius;
+  const distance = Math.hypot(tx - sx, ty - sy);
+  if (!Number.isFinite(distance) || distance <= sr + tr + 1) return "";
+  const ux = (tx - sx) / distance;
+  const uy = (ty - sy) / distance;
+  return `M ${sx + ux * sr} ${sy + uy * sr} L ${tx - ux * tr} ${ty - uy * tr}`;
+}
 
-  const uy =
-    dy /
-    distance;
+function createTaperedRibbonPath(source, target, startWidth, endWidth = EDGE_END_WIDTH) {
+  const sx = source.renderX ?? source.screenX;
+  const sy = source.renderY ?? source.screenY;
+  const tx = target.renderX ?? target.screenX;
+  const ty = target.renderY ?? target.screenY;
+  const sourceRadius = source.renderRadius ?? source.screenRadius;
+  const targetRadius = target.renderRadius ?? target.screenRadius;
+  const dx = tx - sx;
+  const dy = ty - sy;
+  const distance = Math.hypot(dx, dy);
+  const gap = distance - sourceRadius - targetRadius;
 
+  // Overlapping nodes have no visible bridge between their surfaces.
+  if (!Number.isFinite(gap) || gap <= 1) return "";
 
-  const nx =
-    -uy;
+  const ux = dx / distance;
+  const uy = dy / distance;
+  const nx = -uy;
+  const ny = ux;
 
+  // A short bridge retains its body; a stretched bridge develops a thin neck.
+  // Normalize by node size so the material behaves consistently at every scale.
+  const compactness = 1 / (1 + gap / Math.max(1, (sourceRadius + targetRadius) * 0.7));
+  // Add a radius-proportional attachment width while retaining traffic weight.
+  const attachmentWidth = startWidth + sourceRadius * 0.4;
+  const startHalf = Math.min(attachmentWidth * (1 + 0.35 * compactness) / 2, sourceRadius * 0.65);
+  const endHalf = Math.min(endWidth * (0.55 + 0.45 * compactness) / 2, startHalf, targetRadius * 0.4);
+  const neckHalf = endHalf + (startHalf - endHalf) * (0.12 + 0.5 * compactness);
 
-  const ny =
-    ux;
+  // Sink each cap slightly into its bubble so the glue stays attached.
+  const sourceOffset = Math.sqrt(Math.max(0, sourceRadius ** 2 - startHalf ** 2)) - 0.5;
+  const targetOffset = Math.sqrt(Math.max(0, targetRadius ** 2 - endHalf ** 2)) - 0.5;
+  const sourceX = sx + ux * sourceOffset;
+  const sourceY = sy + uy * sourceOffset;
+  const targetX = tx - ux * targetOffset;
+  const targetY = ty - uy * targetOffset;
+  const length = distance - sourceOffset - targetOffset;
+  const point = (t, width) => [
+    sourceX + ux * length * t + nx * width,
+    sourceY + uy * length * t + ny * width
+  ].join(" ");
 
+  // Stable, pair-specific variation: no random changes between animation frames.
+  const names = [source.domain ?? "source", target.domain ?? "target"].sort();
+  let seed = 2166136261;
+  for (const char of names.join("|")) seed = Math.imul(seed ^ char.charCodeAt(0), 16777619) >>> 0;
+  const shape = (seed & 255) / 255;
+  const balance = ((seed >>> 8) & 255) / 255;
+  const orientation = (source.domain ?? "source") === names[0] ? 1 : -1;
+  const bend = (balance * 2 - 1) * orientation * Math.min(8, gap * 0.035, neckHalf * 0.65);
+  const shoulder = 0.09 + shape * 0.11;
+  const waist = 0.48 + balance * 0.18;
+  const asymmetry = 0.78 + shape * 0.44;
 
-  const sourceX =
-    sx
-    +
-    ux *
-    (
-      sourceRadius +
-      1
-    );
-
-
-  const sourceY =
-    sy
-    +
-    uy *
-    (
-      sourceRadius +
-      1
-    );
-
-
-  const targetX =
-    tx
-    -
-    ux *
-    (
-      targetRadius +
-      1
-    );
-
-
-  const targetY =
-    ty
-    -
-    uy *
-    (
-      targetRadius +
-      1
-    );
-
-
-  const startHalf =
-    startWidth /
-    2;
-
-
-  const endHalf =
-    endWidth /
-    2;
-
-
-  return `
-    M
-    ${sourceX + nx * startHalf}
-    ${sourceY + ny * startHalf}
-
-    L
-    ${targetX + nx * endHalf}
-    ${targetY + ny * endHalf}
-
-    L
-    ${targetX - nx * endHalf}
-    ${targetY - ny * endHalf}
-
-    L
-    ${sourceX - nx * startHalf}
-    ${sourceY - ny * startHalf}
-
-    Z
-  `;
+  // Unequal shoulders and a gently bowed neck resemble stretched liquid.
+  // Both sides retain positive width and the same longitudinal control positions.
+  const tailHalf = endHalf + (neckHalf - endHalf) * 0.25;
+  return `M ${point(0, startHalf)}
+    C ${point(shoulder, bend * 0.45 + neckHalf * asymmetry)} ${point(waist, bend + tailHalf)} ${targetX + nx * endHalf} ${targetY + ny * endHalf}
+    L ${targetX - nx * endHalf} ${targetY - ny * endHalf}
+    C ${point(waist, bend - tailHalf)} ${point(shoulder, bend * 0.45 - neckHalf * (2 - asymmetry))} ${point(0, -startHalf)}
+    Z`;
 }
 
 
@@ -2667,6 +3844,63 @@ function getFaviconCandidates(
 }
 
 
+const faviconContrastCache = new Map();
+
+function measureFaviconDarkness(pixels) {
+  let weight = 0, darkness = 0;
+  for (let i = 0; i < pixels.length; i += 4) {
+    const alpha = pixels[i + 3] / 255;
+    if (alpha < 0.1) continue;
+    const luminance = (0.2126 * pixels[i] + 0.7152 * pixels[i + 1] + 0.0722 * pixels[i + 2]) / 255;
+    darkness += alpha * Math.max(0, Math.min(1, (0.48 - luminance) / 0.38));
+    weight += alpha;
+  }
+  return weight ? darkness / weight : 0;
+}
+
+function getFaviconDarkness(url) {
+  if (faviconContrastCache.has(url)) return faviconContrastCache.get(url);
+  const result = new Promise(resolve => {
+    const image = new Image();
+    let settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      image.onload = image.onerror = null;
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(0), 5000);
+    // Cross-origin images need CORS permission for pixel analysis. A failure
+    // must leave the original favicon usable, without guessing its brightness.
+    if (/^https?:/.test(url) && new URL(url).origin !== location.origin) image.crossOrigin = "anonymous";
+    image.onload = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = canvas.height = 32;
+        const context = canvas.getContext("2d", {willReadFrequently:true});
+        context.drawImage(image, 0, 0, 32, 32);
+        finish(measureFaviconDarkness(context.getImageData(0, 0, 32, 32).data));
+      } catch { finish(0); }
+    };
+    image.onerror = () => finish(0);
+    image.src = url;
+  });
+  // Bound retained URL promises during long-running history/period browsing.
+  if (faviconContrastCache.size >= 256) faviconContrastCache.delete(faviconContrastCache.keys().next().value);
+  faviconContrastCache.set(url, result);
+  return result;
+}
+
+async function applyFaviconContrast(favicon, url) {
+  const darkness = await getFaviconDarkness(url);
+  if (!favicon.isConnected || favicon.getAttribute("href") !== url) return;
+  // Shadows follow the alpha silhouette, never a circular backing plate.
+  favicon.style.filter = darkness > 0.08
+    ? `drop-shadow(0 0 0.65px rgba(255,255,255,${(darkness * 0.7).toFixed(3)})) drop-shadow(0 0 2.5px rgba(255,255,255,${(darkness * 0.4).toFixed(3)}))`
+    : "none";
+}
+
 function bindNodeFavicon(
   node,
   favicon,
@@ -2694,6 +3928,7 @@ function bindNodeFavicon(
 
   function tryNext() {
 
+    favicon.style.filter = "none";
     if (
       index >=
       candidates.length
@@ -2735,6 +3970,7 @@ function bindNodeFavicon(
       fallback.style.display =
         "none";
 
+      applyFaviconContrast(favicon, favicon.getAttribute("href"));
 
       onLoaded?.(
         favicon.getAttribute(
@@ -3471,6 +4707,8 @@ function setHoveredNode(
   hoverLayer
 ) {
 
+  if (historyActive && node?.domain !== selectedDomain) node = null;
+
   if (
     hoveredNode ===
     node
@@ -3519,6 +4757,7 @@ function setHoveredNode(
   hoveredNode =
     node;
 
+  updateEdgeHover(node?.domain ?? null);
 
   /*
    * 일반 노드들의 SVG 순서를 다시 실제 z축 순서로 맞춘다.
@@ -3893,6 +5132,8 @@ function startAnimation(
         node.radius *
         projectionScale;
 
+      updateNodeLens(node);
+
 
       /*
        * 뒤쪽 노드는 평상시에 약간 투명하지만,
@@ -4030,42 +5271,14 @@ function startAnimation(
       of edgePairs
     ) {
 
-      if (
-        pair.aToBElement
-      ) {
-
-        pair.aToBElement.setAttribute(
-          "d",
-
-          createTaperedRibbonPath(
-            pair.nodeA,
-            pair.nodeB,
-
-            calculateEdgeStartWidth(
-              pair.aToB
-            )
-          )
-        );
+      if (pair.lineElement) {
+        pair.lineElement.setAttribute("d", createSimpleEdgePath(pair.nodeA, pair.nodeB));
+      }
+      if (pair.gelElement) {
+        updateEdgeGelMaterial(pair);
+        syncEdgeGlass(pair);
       }
 
-
-      if (
-        pair.bToAElement
-      ) {
-
-        pair.bToAElement.setAttribute(
-          "d",
-
-          createTaperedRibbonPath(
-            pair.nodeB,
-            pair.nodeA,
-
-            calculateEdgeStartWidth(
-              pair.bToA
-            )
-          )
-        );
-      }
     }
 
 
@@ -4087,7 +5300,31 @@ function startAnimation(
 // Selection
 // ==================================================
 
+function selectNode(node, graph, { toggle = true, singleNode = false } = {}) {
+  if (toggle && selectedDomain === node.domain) {
+    clearSelection();
+    return;
+  }
+
+  highlightNode(node.domain, graph, singleNode);
+  showNodeDetail(node, graph);
+}
+
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && selectedDomain !== null) {
+    clearSelection();
+  }
+});
+
 function clearSelection() {
+
+  selectedDomain =
+    null;
+
+  document.querySelectorAll(".node-group.is-selected, .ranking-item.is-selected")
+    .forEach(element => element.classList.remove("is-selected"));
+  rankingListElement.querySelectorAll(".ranking-item")
+    .forEach(item => item.setAttribute("aria-pressed", "false"));
 
   document
     .querySelectorAll(
@@ -4129,28 +5366,35 @@ function clearSelection() {
             "is-selected"
           )
     );
+
+
+  renderDetailPlaceholder();
 }
 
 
 function highlightNode(
-  selectedDomain,
-  graph
+  domain,
+  graph,
+  singleNode = false
 ) {
+
+  selectedDomain =
+    domain;
 
   const connected =
     new Set([
-      selectedDomain
+      domain
     ]);
 
 
   for (
     const edge
-    of graph.edges
+    of (singleNode ? [] : graph.edges)
   ) {
 
     if (
       edge.source ===
-      selectedDomain
+      domain
     ) {
 
       connected.add(
@@ -4161,7 +5405,7 @@ function highlightNode(
 
     if (
       edge.target ===
-      selectedDomain
+      domain
     ) {
 
       connected.add(
@@ -4177,6 +5421,8 @@ function highlightNode(
     )
     .forEach(
       group => {
+
+        group.classList.toggle("is-selected", group.dataset.domain === domain);
 
         group.classList.toggle(
           "dimmed",
@@ -4198,10 +5444,10 @@ function highlightNode(
 
         const connectedEdge =
           group.dataset.a ===
-            selectedDomain
+            domain
           ||
           group.dataset.b ===
-            selectedDomain;
+            domain;
 
 
         group.classList.toggle(
@@ -4225,14 +5471,73 @@ function highlightNode(
     .forEach(
       item => {
 
+        item.setAttribute("aria-pressed", String(item.dataset.domain === domain));
+
         item.classList.toggle(
           "is-selected",
 
           item.dataset.domain ===
-          selectedDomain
+          domain
         );
       }
     );
+}
+
+
+function renderDetailPlaceholder() {
+
+  const period =
+    PERIODS[activePeriodKey] ??
+    PERIODS.today;
+
+
+  detailElement.innerHTML =
+    "";
+
+
+  const eyebrow =
+    document.createElement(
+      "div"
+    );
+
+
+  eyebrow.className =
+    "panel-eyebrow";
+
+
+  eyebrow.textContent =
+    "사이트 상세정보";
+
+
+  const title =
+    document.createElement(
+      "h2"
+    );
+
+
+  title.textContent =
+    "사이트를 선택하세요";
+
+
+  const description =
+    document.createElement(
+      "p"
+    );
+
+
+  description.className =
+    "panel-description";
+
+
+  description.textContent =
+    `${getDisplayedPeriodLabel()} 지도나 이용률 순위에서 사이트를 선택하세요. 같은 사이트를 다시 누르거나 빈 공간 클릭, Esc 키로 선택을 해제할 수 있습니다.`;
+
+
+  detailElement.append(
+    eyebrow,
+    title,
+    description
+  );
 }
 
 
@@ -4298,7 +5603,7 @@ function showNodeDetail(
 
 
   eyebrow.textContent =
-    "선택한 사이트";
+    `${getDisplayedPeriodLabel()} · 선택한 사이트`;
 
 
   const title =
@@ -4331,13 +5636,13 @@ function showNodeDetail(
     ],
 
     [
-      "세션",
+      "방문 횟수",
       `${node.sessionCount}회`
     ],
 
     [
       "연결",
-      `${incoming.length + outgoing.length}개`
+      `${new Set([...incoming.map(edge => edge.source), ...outgoing.map(edge => edge.target)]).size}개`
     ],
 
     [
@@ -4407,6 +5712,20 @@ function showNodeDetail(
     stats
   );
 
+  const clearButton = document.createElement("button");
+  clearButton.type = "button";
+  clearButton.className = "detail-clear-selection";
+  clearButton.textContent = "선택 해제";
+  clearButton.addEventListener("click", clearSelection);
+  detailElement.appendChild(clearButton);
+
+  if (incoming.length === 0 && outgoing.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "panel-description";
+    empty.textContent = "선택한 기간에는 다른 사이트와의 이동 기록이 없습니다.";
+    detailElement.appendChild(empty);
+  }
+
 
   if (
     incoming.length >
@@ -4443,8 +5762,7 @@ function showNodeDetail(
         );
 
 
-      item.textContent =
-        `${edge.source} → ${node.domain} (${edge.count}회)`;
+      item.appendChild(createRelatedSiteButton(edge.source, edge.count, graph));
 
 
       list.appendChild(
@@ -4495,8 +5813,7 @@ function showNodeDetail(
         );
 
 
-      item.textContent =
-        `${node.domain} → ${edge.target} (${edge.count}회)`;
+      item.appendChild(createRelatedSiteButton(edge.target, edge.count, graph));
 
 
       list.appendChild(
@@ -4516,6 +5833,18 @@ function showNodeDetail(
 // ==================================================
 // Ranking
 // ==================================================
+
+function createRelatedSiteButton(domain, count, graph) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "detail-related-site";
+  button.textContent = `${domain} · ${count}회`;
+  button.addEventListener("click", () => {
+    const node = graph.nodes.find(candidate => candidate.domain === domain);
+    if (node) selectNode(node, graph, { toggle: false });
+  });
+  return button;
+}
 
 function renderRanking(
   nodes,
@@ -4628,6 +5957,8 @@ function renderRanking(
 
       item.className =
         "ranking-item";
+
+      item.setAttribute("aria-pressed", "false");
 
 
       item.dataset.domain =
@@ -4777,16 +6108,7 @@ function renderRanking(
         "click",
         () => {
 
-          highlightNode(
-            node.domain,
-            graph
-          );
-
-
-          showNodeDetail(
-            node,
-            graph
-          );
+          selectNode(node, graph);
         }
       );
 
@@ -4812,6 +6134,36 @@ function createDefinitions() {
 
 
   defs.innerHTML = `
+
+    <linearGradient id="edgeGlassLight" x1="0%" y1="0%" x2="35%" y2="100%">
+      <stop offset="0%" stop-color="white" stop-opacity="0.12" />
+      <stop offset="24%" stop-color="white" stop-opacity="0.04" />
+      <stop offset="36%" stop-color="white" stop-opacity="0.38" />
+      <stop offset="43%" stop-color="white" stop-opacity="0.04" />
+      <stop offset="64%" stop-color="white" stop-opacity="0" />
+      <stop offset="78%" stop-color="white" stop-opacity="0.2" />
+      <stop offset="100%" stop-color="white" stop-opacity="0.04" />
+    </linearGradient>
+    <linearGradient id="edgeReflection" x1="0%" y1="0%" x2="25%" y2="100%">
+      <stop offset="0%" stop-color="white" stop-opacity="0.8"/>
+      <stop offset="30%" stop-color="white" stop-opacity="0.35"/>
+      <stop offset="55%" stop-color="white" stop-opacity="0"/>
+      <stop offset="100%" stop-color="white" stop-opacity="0.28"/>
+    </linearGradient>
+    <filter id="edgeSoftShadow" x="-40%" y="-80%" width="180%" height="260%">
+      <feGaussianBlur stdDeviation="3"/>
+      <feOffset dy="3"/>
+    </filter>
+    <filter id="edgeGlassDistortion" x="-15%" y="-30%" width="130%" height="160%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.018 0.035" numOctaves="2" seed="12" result="ripple" />
+      <feDisplacementMap in="SourceGraphic" in2="ripple" scale="5" xChannelSelector="R" yChannelSelector="G" />
+      <feGaussianBlur stdDeviation="0.35" />
+    </filter>
+    <filter id="edgeGlassGlow" x="-30%" y="-30%" width="160%" height="160%" color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="2" result="softGlow" />
+      <feMerge><feMergeNode in="softGlow" /><feMergeNode in="SourceGraphic" /></feMerge>
+    </filter>
+
 
     <radialGradient
       id="dropletGradient"
@@ -4907,34 +6259,6 @@ function createDefinitions() {
 
 
     <filter
-      id="hoverGlow"
-      x="-160%"
-      y="-160%"
-      width="420%"
-      height="420%"
-    >
-
-      <feGaussianBlur
-        stdDeviation="6"
-        result="blurred"
-      />
-
-      <feMerge>
-
-        <feMergeNode
-          in="blurred"
-        />
-
-        <feMergeNode
-          in="SourceGraphic"
-        />
-
-      </feMerge>
-
-    </filter>
-
-
-    <filter
       id="highlightBlur"
       x="-100%"
       y="-100%"
@@ -4965,7 +6289,8 @@ function createDefinitions() {
 // ==================================================
 
 function renderGraph(
-  graph
+  graph,
+  range
 ) {
 
   if (
@@ -4989,6 +6314,32 @@ function renderGraph(
   svg.innerHTML =
     "";
 
+  // Base and refracted copies share identical SVG coordinates, even on resize.
+  const backgroundImage = createMapBackgroundImage();
+  backgroundImage.setAttribute("class", "map-background");
+  svg.appendChild(backgroundImage);
+  svg.appendChild(createStarTwinkleLayer());
+
+
+  /*
+   * 같은 SVG에 기간별 handler가 누적되지 않게
+   * property handler를 매번 새 graph 기준으로 교체한다.
+   */
+  svg.onpointermove =
+    null;
+
+
+  svg.onpointerleave =
+    null;
+
+
+  svg.onpointerdown =
+    null;
+
+
+  svg.onpointerup =
+    null;
+
 
   const {
     nodes,
@@ -5003,7 +6354,7 @@ function renderGraph(
   ) {
 
     summaryElement.textContent =
-      "아직 기록된 데이터가 없습니다.";
+      `${range.label} · 선택 기간에 기록이 없습니다.`;
 
 
     rankingListElement.textContent =
@@ -5021,7 +6372,7 @@ function renderGraph(
   /*
    * 중요도 계산도 여기서 이뤄진다.
    */
-  createForceLayout(
+  createComponentForceLayout(
     nodes,
     edges
   );
@@ -5174,87 +6525,41 @@ function renderGraph(
     group.dataset.b =
       pair.b;
 
-
-    if (
-      pair.aToB >
-      0
-    ) {
-
-      const ribbon =
-        createSvgElement(
-          "path"
-        );
+    const line = createSvgElement("path");
+    line.setAttribute("class", "edge-line");
+    line.style.strokeWidth = `${calculateSimpleEdgeWidth(pair.aToB + pair.bToA)}px`;
+    line.setAttribute("d", createSimpleEdgePath(a, b));
+    group.appendChild(line);
+    pair.lineElement = line;
 
 
-      ribbon.setAttribute(
-        "class",
-        "edge-ribbon"
-      );
-
-
-      ribbon.setAttribute(
-        "d",
-
-        createTaperedRibbonPath(
-          a,
-          b,
-
-          calculateEdgeStartWidth(
-            pair.aToB
-          )
-        )
-      );
-
-
-      pair.aToBElement =
-        ribbon;
-
-
-      group.appendChild(
-        ribbon
-      );
-    }
-
-
-    if (
-      pair.bToA >
-      0
-    ) {
-
-      const ribbon =
-        createSvgElement(
-          "path"
-        );
-
-
-      ribbon.setAttribute(
-        "class",
-        "edge-ribbon"
-      );
-
-
-      ribbon.setAttribute(
-        "d",
-
-        createTaperedRibbonPath(
-          b,
-          a,
-
-          calculateEdgeStartWidth(
-            pair.bToA
-          )
-        )
-      );
-
-
-      pair.bToAElement =
-        ribbon;
-
-
-      group.appendChild(
-        ribbon
-      );
-    }
+    const gel = createSvgElement("path");
+    gel.setAttribute("class", "edge-ribbon");
+    const surface = createLensSurface(defs, `edge-refraction-${edgePairs.indexOf(pair)}`);
+    surface.group.setAttribute("class", "edge-glass");
+    surface.image.setAttribute("class", "edge-refracted-background");
+    pair.lensSurface = surface;
+    pair.glassElement = createSvgElement("path");
+    pair.glassElement.setAttribute("fill", "url(#edgeGlassLight)");
+    pair.glassElement.setAttribute("opacity", "0.65");
+    surface.group.appendChild(pair.glassElement);
+    pair.reflectionElement = createSvgElement("path");
+    pair.reflectionElement.setAttribute("fill", "none");
+    pair.reflectionElement.setAttribute("stroke", "url(#edgeReflection)");
+    pair.reflectionElement.setAttribute("stroke-width", "1.6");
+    surface.group.appendChild(pair.reflectionElement);
+    surface.overlays.push(pair.glassElement, pair.reflectionElement);
+    pair.shadowElement = createSvgElement("path");
+    pair.shadowElement.setAttribute("class", "edge-glass-shadow");
+    pair.shadowElement.setAttribute("fill", "black");
+    pair.shadowElement.setAttribute("opacity", "0.38");
+    pair.shadowElement.setAttribute("filter", "url(#edgeSoftShadow)");
+    group.appendChild(pair.shadowElement);
+    group.appendChild(surface.group);
+    group.appendChild(gel);
+    pair.gelElement = gel;
+    updateEdgeGelMaterial(pair);
+    syncEdgeGlass(pair);
 
 
     edgeLayer.appendChild(
@@ -5295,6 +6600,10 @@ function renderGraph(
     "hover-layer"
   );
 
+
+  const nodeLensLayer = createSvgElement("g");
+  nodeLensLayer.setAttribute("class", "node-lens-layer");
+  svg.appendChild(nodeLensLayer);
 
   const sortedNodes =
     [...nodes]
@@ -5341,201 +6650,88 @@ function renderGraph(
       node.domGroup =
         group;
 
-
-      // ----------------------------------------------
-      // Hover glow
-      // ----------------------------------------------
-
-      const hoverGlow =
-        createSvgElement(
-          "circle"
-        );
+      node.lensSurface = createLensSurface(defs, `node-lens-${index}`);
+      node.lensSurface.image.setAttribute("class", "node-refracted-background");
+      nodeLensLayer.appendChild(node.lensSurface.group);
+      updateNodeLens(node);
 
 
-      hoverGlow.setAttribute(
-        "cx",
-        node.screenX
-      );
+// ----------------------------------------------
+// Hover glow texture
+// ----------------------------------------------
+
+/*
+ * 하나의 투명 PNG를 모든 노드가 공유한다.
+ *
+ * 실제 물방울보다 훨씬 크게 그려서
+ * 바깥쪽으로 빛이 자연스럽게 퍼지게 한다.
+ */
+const glowSize =
+  node.screenRadius *
+  NODE_GLOW_SIZE_MULTIPLIER;
 
 
-      hoverGlow.setAttribute(
-        "cy",
-        node.screenY
-      );
+const hoverGlow =
+  createSvgElement(
+    "image"
+  );
 
 
-      hoverGlow.setAttribute(
-        "r",
-        node.screenRadius *
-        1.06
-      );
+hoverGlow.setAttribute(
+  "href",
+  NODE_GLOW_TEXTURE_URL
+);
 
 
-      hoverGlow.setAttribute(
-        "class",
-        "node-hover-glow"
-      );
+hoverGlow.setAttribute(
+  "x",
+  node.screenX -
+  glowSize / 2
+);
 
 
-      hoverGlow.setAttribute(
-        "filter",
-        "url(#hoverGlow)"
-      );
+hoverGlow.setAttribute(
+  "y",
+  node.screenY -
+  glowSize / 2
+);
 
 
-      group.appendChild(
-        hoverGlow
-      );
+hoverGlow.setAttribute(
+  "width",
+  glowSize
+);
 
 
-      // ----------------------------------------------
-      // Glass body
-      // ----------------------------------------------
-
-      const body =
-        createSvgElement(
-          "circle"
-        );
+hoverGlow.setAttribute(
+  "height",
+  glowSize
+);
 
 
-      body.setAttribute(
-        "cx",
-        node.screenX
-      );
+hoverGlow.setAttribute(
+  "preserveAspectRatio",
+  "xMidYMid meet"
+);
 
 
-      body.setAttribute(
-        "cy",
-        node.screenY
-      );
+hoverGlow.setAttribute(
+  "class",
+  "node-hover-glow"
+);
 
 
-      body.setAttribute(
-        "r",
-        node.screenRadius
-      );
+/*
+ * 반드시 droplet 본체보다 먼저 append한다.
+ *
+ * 그래야 글로우가 물방울 뒤에서 빛나는 것처럼 보인다.
+ */
+group.appendChild(
+  hoverGlow
+);
 
 
-      body.setAttribute(
-        "class",
-        "droplet-node"
-      );
 
-
-      body.setAttribute(
-        "fill",
-        "url(#dropletGradient)"
-      );
-
-
-      body.setAttribute(
-        "filter",
-        "url(#dropletShadow)"
-      );
-
-
-      group.appendChild(
-        body
-      );
-
-
-      // ----------------------------------------------
-      // Brand Color
-      // ----------------------------------------------
-
-      const brandGradient =
-        createBrandGradient(
-          defs,
-          index
-        );
-
-
-      const brandCircle =
-        createSvgElement(
-          "circle"
-        );
-
-
-      brandCircle.setAttribute(
-        "cx",
-        node.screenX
-      );
-
-
-      brandCircle.setAttribute(
-        "cy",
-        node.screenY
-      );
-
-
-      brandCircle.setAttribute(
-        "r",
-        node.screenRadius *
-        0.48
-      );
-
-
-      brandCircle.setAttribute(
-        "fill",
-        `url(#${brandGradient.id})`
-      );
-
-
-      brandCircle.setAttribute(
-        "class",
-        "node-brand-fill"
-      );
-
-
-      group.appendChild(
-        brandCircle
-      );
-
-
-      // ----------------------------------------------
-      // Inner glass
-      // ----------------------------------------------
-
-      const innerGlass =
-        createSvgElement(
-          "circle"
-        );
-
-
-      innerGlass.setAttribute(
-        "cx",
-        node.screenX
-      );
-
-
-      innerGlass.setAttribute(
-        "cy",
-        node.screenY
-      );
-
-
-      innerGlass.setAttribute(
-        "r",
-        node.screenRadius *
-        0.92
-      );
-
-
-      innerGlass.setAttribute(
-        "fill",
-        "url(#innerGlassGradient)"
-      );
-
-
-      innerGlass.setAttribute(
-        "class",
-        "droplet-inner"
-      );
-
-
-      group.appendChild(
-        innerGlass
-      );
 
 
       // ----------------------------------------------
@@ -5595,7 +6791,7 @@ function renderGraph(
 
       const iconSize =
         node.screenRadius *
-        0.94;
+        NODE_FAVICON_SIZE_MULTIPLIER;
 
 
       const favicon =
@@ -5651,128 +6847,27 @@ function renderGraph(
       );
 
 
-      bindNodeFavicon(
-        node,
-        favicon,
-        fallback,
+      bindNodeFavicon(node, favicon, fallback);
 
-        loadedUrl => {
+      // The supplied transparent bubble is painted above the favicon.
+      // Adjust this multiplier if a replacement PNG has different padding.
+      const bubbleSize = node.screenRadius * NODE_BUBBLE_SIZE_MULTIPLIER;
+      const bubble = createSvgElement("image");
+      bubble.setAttribute("href", getNodeBubbleTexture(node.domain));
+      bubble.setAttribute("x", node.screenX - bubbleSize / 2);
+      bubble.setAttribute("y", node.screenY - bubbleSize / 2);
+      bubble.setAttribute("width", bubbleSize);
+      bubble.setAttribute("height", bubbleSize);
+      bubble.setAttribute("preserveAspectRatio", "xMidYMid meet");
+      bubble.setAttribute("class", "node-bubble");
+      group.appendChild(bubble);
 
-          applyBrandColor(
-            node,
-            brandGradient,
-            loadedUrl
-          );
-        }
-      );
-
-
-      // ----------------------------------------------
-      // Glass Highlight
-      // ----------------------------------------------
-
-      const highlight =
-        createSvgElement(
-          "ellipse"
-        );
-
-
-      highlight.setAttribute(
-        "cx",
-
-        node.screenX -
-        node.screenRadius *
-        0.24
-      );
-
-
-      highlight.setAttribute(
-        "cy",
-
-        node.screenY -
-        node.screenRadius *
-        0.31
-      );
-
-
-      highlight.setAttribute(
-        "rx",
-
-        node.screenRadius *
-        0.35
-      );
-
-
-      highlight.setAttribute(
-        "ry",
-
-        node.screenRadius *
-        0.12
-      );
-
-
-      highlight.setAttribute(
-        "class",
-        "droplet-highlight"
-      );
-
-
-      highlight.setAttribute(
-        "filter",
-        "url(#highlightBlur)"
-      );
-
-
-      group.appendChild(
-        highlight
-      );
-
-
-      const glint =
-        createSvgElement(
-          "circle"
-        );
-
-
-      glint.setAttribute(
-        "cx",
-
-        node.screenX -
-        node.screenRadius *
-        0.42
-      );
-
-
-      glint.setAttribute(
-        "cy",
-
-        node.screenY -
-        node.screenRadius *
-        0.38
-      );
-
-
-      glint.setAttribute(
-        "r",
-
-        Math.max(
-          1.6,
-
-          node.screenRadius *
-          0.055
-        )
-      );
-
-
-      glint.setAttribute(
-        "class",
-        "droplet-glint"
-      );
-
-
-      group.appendChild(
-        glint
-      );
+      const hoverRim = createSvgElement("circle");
+      hoverRim.setAttribute("cx", node.screenX);
+      hoverRim.setAttribute("cy", node.screenY);
+      hoverRim.setAttribute("r", node.screenRadius);
+      hoverRim.setAttribute("class", "node-hover-rim");
+      group.appendChild(hoverRim);
 
 
       // ----------------------------------------------
@@ -5849,9 +6944,7 @@ function renderGraph(
   // Pointer interaction
   // ==================================================
 
-  svg.addEventListener(
-    "pointermove",
-
+  svg.onpointermove =
     event => {
 
       const point =
@@ -5888,13 +6981,10 @@ function renderGraph(
           ? "pointer"
 
           : "default";
-    }
-  );
+    };
 
 
-  svg.addEventListener(
-    "pointerleave",
-
+  svg.onpointerleave =
     () => {
 
       setHoveredNode(
@@ -5915,13 +7005,10 @@ function renderGraph(
 
       pointerDownPoint =
         null;
-    }
-  );
+    };
 
 
-  svg.addEventListener(
-    "pointerdown",
-
+  svg.onpointerdown =
     event => {
 
       const point =
@@ -5952,13 +7039,10 @@ function renderGraph(
         y:
           point.y
       };
-    }
-  );
+    };
 
 
-  svg.addEventListener(
-    "pointerup",
-
+  svg.onpointerup =
     event => {
 
       const point =
@@ -6017,16 +7101,7 @@ function renderGraph(
         8
       ) {
 
-        highlightNode(
-          upNode.domain,
-          graph
-        );
-
-
-        showNodeDetail(
-          upNode,
-          graph
-        );
+        selectNode(upNode, graph);
 
       } else if (
         !pointerDownNode &&
@@ -6045,8 +7120,7 @@ function renderGraph(
 
       pointerDownPoint =
         null;
-    }
-  );
+    };
 
 
   // ==================================================
@@ -6080,7 +7154,7 @@ function renderGraph(
 
 
   summaryElement.textContent =
-    `${nodes.length}개 사이트 · ${transitionCount}번 이동 · ${formatDuration(totalTime)}`;
+    `${range.label} · ${nodes.length}개 사이트 · ${transitionCount}번 이동 · ${formatDuration(totalTime)}`;
 
 
   startAnimation(
@@ -6092,6 +7166,140 @@ function renderGraph(
 }
 
 
+function updatePeriodFilterState() {
+
+  periodFilterElement
+    .querySelectorAll(
+      ".period-filter-button"
+    )
+    .forEach(
+      button => {
+
+        const isActive =
+          button.dataset.period ===
+          activePeriodKey;
+
+
+        button.classList.toggle(
+          "is-active",
+          isActive
+        );
+
+
+        button.setAttribute(
+          "aria-pressed",
+          String(
+            isActive
+          )
+        );
+      }
+    );
+}
+
+
+let periodRenderVersion = 0;
+
+async function renderActivePeriod() {
+  stopHistoryPlayback();
+  const version = ++periodRenderVersion;
+
+  const range =
+    getPeriodRange(
+      activePeriodKey
+    );
+
+
+  updatePeriodFilterState();
+  let sessions;
+  try {
+    const response = await requestMapData({ type: "GET_SESSIONS", range });
+    if (version !== periodRenderVersion) return;
+    sessions = clipSessionsToRange(response.sessions, range);
+  } catch (error) {
+    if (version === periodRenderVersion) summaryElement.textContent = `데이터를 불러오지 못했습니다: ${error.message}`;
+    return;
+  }
+
+
+  const graph =
+    aggregateSessions(
+      sessions
+    );
+
+
+  updatePeriodFilterState();
+
+
+  renderGraph(
+    graph,
+    range
+  );
+
+  updatePeriodComparison(range, sessions);
+
+
+  const selectedNode =
+    graph.nodes.find(
+      node =>
+        node.domain ===
+        selectedDomain
+    );
+
+
+  if (
+    selectedNode
+  ) {
+
+    selectNode(selectedNode, graph, { toggle: false });
+
+  } else {
+
+    clearSelection();
+  }
+}
+
+
+function bindPeriodFilter() {
+
+  periodFilterElement
+    .querySelectorAll(
+      ".period-filter-button"
+    )
+    .forEach(
+      button => {
+
+        button.addEventListener(
+          "click",
+
+          () => {
+
+            const nextPeriodKey =
+              button.dataset.period;
+
+
+            if (
+              !PERIODS[nextPeriodKey] ||
+              (nextPeriodKey ===
+                activePeriodKey &&
+                !historyActive)
+            ) {
+
+              return;
+            }
+
+
+            activePeriodKey =
+              nextPeriodKey;
+
+
+            renderActivePeriod();
+          }
+        );
+      }
+    );
+}
+
+
 // ==================================================
 // Initialize
 // ==================================================
@@ -6100,19 +7308,12 @@ async function initialize() {
 
   try {
 
-    const sessions =
-      await loadSessions();
-
-
-    const graph =
-      aggregateSessions(
-        sessions
-      );
-
-
-    renderGraph(
-      graph
-    );
+    await initializeSiteGrouping();
+    initializeMapZoom();
+    bindPeriodFilter();
+    initializeHistoryTools();
+    initializeDataTools();
+    await renderActivePeriod();
 
   } catch (
     error

@@ -1,6 +1,9 @@
 import {
   saveSession,
-  getAllSessions
+  getAllSessions,
+  getSessionsInRange,
+  importSessions,
+  clearSessions
 } from "../src/db.js";
 
 
@@ -55,6 +58,10 @@ function enqueueTracking(task) {
 
 const CURRENT_SESSION_KEY =
   "currentSession";
+
+
+const TRACKING_ENABLED_KEY =
+  "trackingEnabled";
 
 
 // ==================================================
@@ -166,6 +173,34 @@ async function clearCurrentSession() {
   await chrome.storage.session.remove(
     CURRENT_SESSION_KEY
   );
+}
+
+
+async function isTrackingEnabled() {
+
+  const result =
+    await chrome.storage.local.get(
+      TRACKING_ENABLED_KEY
+    );
+
+
+  return result[
+    TRACKING_ENABLED_KEY
+  ] !==
+    false;
+}
+
+
+async function setTrackingEnabled(
+  enabled
+) {
+
+  await chrome.storage.local.set({
+
+    [TRACKING_ENABLED_KEY]:
+      enabled
+
+  });
 }
 
 
@@ -405,6 +440,16 @@ async function startSession(
  */
 async function inspectActiveTab() {
 
+  if (
+    !(await isTrackingEnabled())
+  ) {
+
+    await closeCurrentSession();
+
+    return;
+  }
+
+
   const windows =
     await chrome.windows.getAll();
 
@@ -608,12 +653,23 @@ chrome.runtime.onInstalled.addListener(
 
       async () => {
 
-        await chrome.storage.local.set({
+        const result =
+          await chrome.storage.local.get(
+            TRACKING_ENABLED_KEY
+          );
 
-          trackingEnabled:
+
+        if (
+          result[
+            TRACKING_ENABLED_KEY
+          ] ===
+          undefined
+        ) {
+
+          await setTrackingEnabled(
             true
-
-        });
+          );
+        }
 
 
         console.log(
@@ -660,42 +716,35 @@ chrome.runtime.onMessage.addListener(
     sendResponse
   ) => {
 
-    if (
-      message.type ===
-      "GET_SESSIONS"
-    ) {
-
-      getAllSessions()
-
-        .then(
-          sessions => {
-
-            sendResponse({
-
-              sessions
-
-            });
-          }
-        )
-
-        .catch(
-          error => {
-
-            sendResponse({
-
-              error:
-                error.message
-
-            });
-          }
-        );
-
-
-      /*
-       * 비동기 sendResponse 사용.
-       */
-      return true;
-    }
+    const types = ["GET_SESSIONS", "EXPORT_SESSIONS", "IMPORT_SESSIONS", "CLEAR_SESSIONS", "GET_TRACKING_STATUS", "SET_TRACKING_ENABLED"];
+    if (!types.includes(message?.type)) return;
+    // Use the tracking queue so pause, clear and tab events cannot race.
+    const operation = trackingQueue.then(async () => {
+      switch (message.type) {
+        case "GET_SESSIONS":
+          return { sessions: await getSessionsInRange(message.range) };
+        case "EXPORT_SESSIONS":
+          return { sessions: await getAllSessions() };
+        case "IMPORT_SESSIONS":
+          return importSessions(message.sessions);
+        case "GET_TRACKING_STATUS":
+          return { enabled: await isTrackingEnabled() };
+        case "SET_TRACKING_ENABLED":
+          if (typeof message.enabled !== "boolean") throw new Error("기록 설정이 올바르지 않습니다.");
+          if (!message.enabled) await closeCurrentSession();
+          await setTrackingEnabled(message.enabled);
+          if (message.enabled) await inspectActiveTab();
+          return { enabled: message.enabled };
+        case "CLEAR_SESSIONS":
+          await clearSessions();
+          await clearCurrentSession();
+          await inspectActiveTab();
+          return { cleared: true };
+      }
+    });
+    trackingQueue = operation.catch(error => console.error("[Internet Map]", error));
+    operation.then(sendResponse, error => sendResponse({ error: error.message }));
+    return true;
   }
 );
 
