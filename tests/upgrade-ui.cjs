@@ -65,6 +65,23 @@ const assert = require('node:assert/strict');
     await page.waitForSelector('.ranking-item');
     await page.waitForFunction(()=>document.querySelector('#periodComparison').textContent.includes('비교') || document.querySelector('#periodComparison').textContent.includes('이전'));
     assert.equal(await page.locator('.ranking-item').count(), 2);
+    for (const [width,height] of [[1920,1080],[1440,900],[1280,720],[1100,600],[1024,768],[390,844]]) {
+      await page.setViewportSize({width,height});
+      assert(await page.evaluate(()=>{
+        const map=document.querySelector('#network').getBoundingClientRect();
+        const pane=document.querySelector('#graphPane').getBoundingClientRect();
+        const detail=document.querySelector('#detail').getBoundingClientRect();
+        const ranking=document.querySelector('#ranking').getBoundingClientRect();
+        const desktop=innerWidth>=1100;
+        return map.height>0 && Math.abs(map.height-pane.height)<2 &&
+          map.bottom<=innerHeight+1 &&
+          document.documentElement.scrollHeight<=innerHeight+1 &&
+          document.documentElement.scrollWidth<=innerWidth+1 &&
+          (!desktop || (Math.abs(map.top-detail.top)<2 && Math.abs(map.bottom-detail.bottom)<2 &&
+            Math.abs(map.bottom-ranking.bottom)<2));
+      }), 'Viewport-fit map/panels without page overflow at '+width+'x'+height);
+    }
+    await page.setViewportSize({width:1440,height:1000});
     assert(await page.evaluate(()=>{
       const records=[
         {domain:'order.pay.naver.com',fromDomain:'shopping.naver.com',duration:100},
