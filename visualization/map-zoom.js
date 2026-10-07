@@ -9,10 +9,15 @@ function positionMapBackground(image) {
   const box = svg.viewBox.baseVal;
   const ratio = box.width / WIDTH;
   const scale = BACKGROUND_PARALLAX + (1 - BACKGROUND_PARALLAX) * ratio;
-  image.setAttribute("x", (1-BACKGROUND_PARALLAX)*box.x);
-  image.setAttribute("y", (1-BACKGROUND_PARALLAX)*box.y);
-  image.setAttribute("width", WIDTH*scale);
-  image.setAttribute("height", HEIGHT*scale);
+  // SVG meet keeps nodes circular; extend the shared background into any
+  // letterbox area created by a responsive frame with a different aspect ratio.
+  const pixelsPerUnit = Math.min(svg.clientWidth/box.width, svg.clientHeight/box.height);
+  const extraX = pixelsPerUnit > 0 ? Math.max(0,svg.clientWidth/pixelsPerUnit-box.width) : 0;
+  const extraY = pixelsPerUnit > 0 ? Math.max(0,svg.clientHeight/pixelsPerUnit-box.height) : 0;
+  image.setAttribute("x", (1-BACKGROUND_PARALLAX)*box.x-extraX/2);
+  image.setAttribute("y", (1-BACKGROUND_PARALLAX)*box.y-extraY/2);
+  image.setAttribute("width", WIDTH*scale+extraX);
+  image.setAttribute("height", HEIGHT*scale+extraY);
 }
 
 function applyMapView(box) {
@@ -30,6 +35,10 @@ function resetMapZoom() {
 
 function initializeMapZoom() {
   resetMapZoom();
+  const frameObserver = new ResizeObserver(() => {
+    svg.querySelectorAll("[data-map-background]").forEach(positionMapBackground);
+  });
+  frameObserver.observe(svg);
   svg.addEventListener("pointerdown", event => {
     if (event.button !== 0 || svg.viewBox.baseVal.width >= WIDTH) return;
     cancelAnimationFrame(mapZoomFrame);
