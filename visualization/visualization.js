@@ -22,21 +22,25 @@ const WIDTH = 1200;
 const HEIGHT = 700;
 
 const NODE_BUBBLE_TEXTURE_URLS = [
-  "bubble-clean.png"
+  "soap-bubble-01.png",
+  "soap-bubble-02.png",
+  "soap-bubble-03.png",
+  "soap-bubble-04.png",
+  "soap-bubble-05.png"
 ].map(filename => chrome.runtime.getURL(`visualization/assets/${filename}`));
 const nodeBubbleTextures = new Map();
 
 function getNodeBubbleTexture(domain) {
   if (!nodeBubbleTextures.has(domain)) {
-    const index = Math.floor(Math.random() * NODE_BUBBLE_TEXTURE_URLS.length);
+    const index = Math.floor(domainHash(`${domain}:bubble`) * NODE_BUBBLE_TEXTURE_URLS.length);
     nodeBubbleTextures.set(domain, NODE_BUBBLE_TEXTURE_URLS[index]);
   }
   return nodeBubbleTextures.get(domain);
 }
 
-const NODE_FAVICON_SIZE_MULTIPLIER = 1.3;
-// The supplied PNG has roughly 8% transparent padding on each side.
-const NODE_BUBBLE_SIZE_MULTIPLIER = 2.35;
+const NODE_FAVICON_SIZE_MULTIPLIER = 1.42;
+// Bubble frames stay larger than the icon, but leave less empty center space.
+const NODE_BUBBLE_SIZE_MULTIPLIER = 2.22;
 
 const NODE_GLOW_TEXTURE_URL =
   chrome.runtime.getURL(
@@ -195,6 +199,23 @@ const EDGE_MAX_START_WIDTH =
 
 const WOBBLE_ENABLED =
   true;
+
+const reducedMotionQuery =
+  window.matchMedia?.(
+    "(prefers-reduced-motion: reduce)"
+  );
+
+let prefersReducedMotion =
+  reducedMotionQuery?.matches ??
+  false;
+
+reducedMotionQuery?.addEventListener?.(
+  "change",
+  event => {
+    prefersReducedMotion =
+      event.matches;
+  }
+);
 
 
 let animationFrameId =
@@ -3569,6 +3590,40 @@ function calculateEdgeStartWidth(
 
 function syncEdgeGlass(pair) { updateBridgeLens(pair); }
 
+function calculateDirectionalEdgeStartWidth(count) {
+  return Math.min(
+    18,
+    3.2 + Math.log2(Math.max(1, count) + 1) * 2.15
+  );
+}
+
+function calculateEdgeDepthOpacity(source, target) {
+  const averageZ =
+    (
+      (source?.renderZ ?? source?.z ?? 0)
+      +
+      (target?.renderZ ?? target?.z ?? 0)
+    ) /
+    2;
+
+
+  const ratio =
+    Math.max(
+      0,
+      Math.min(
+        1,
+        (averageZ - Z_MIN) / (Z_MAX - Z_MIN)
+      )
+    );
+
+
+  return (
+    0.46 +
+    ratio *
+      0.34
+  ).toFixed(3);
+}
+
 function createMapBackgroundImage() {
   const image = createSvgElement("image");
   image.setAttribute("href", chrome.runtime.getURL("visualization/assets/background.png"));
@@ -3621,11 +3676,6 @@ function updateEdgeGelMaterial(pair) {
     C ${p(0.36, bend - neck)} ${p(0.12, -ah * 0.32)} ${p(0, -ah)} Z`);
 }
 
-function calculateSimpleEdgeWidth(count) {
-  // Absolute logarithmic scale keeps rare links fine and busy links bounded.
-  return Math.min(2.2, 0.8 + 0.28 * Math.log2(Math.max(1, count)));
-}
-
 function updateEdgeHover(domain) {
   svg.querySelectorAll(".edge-pair").forEach(group => {
     group.classList.toggle("edge-hovered",
@@ -3647,7 +3697,7 @@ function createSimpleEdgePath(source, target) {
   return `M ${sx + ux * sr} ${sy + uy * sr} L ${tx - ux * tr} ${ty - uy * tr}`;
 }
 
-function createTaperedRibbonPath(source, target, startWidth, endWidth = EDGE_END_WIDTH) {
+function createTaperedRibbonPath(source, target, startWidth, endWidth = EDGE_END_WIDTH, laneOffset = 0) {
   const sx = source.renderX ?? source.screenX;
   const sy = source.renderY ?? source.screenY;
   const tx = target.renderX ?? target.screenX;
@@ -3667,48 +3717,85 @@ function createTaperedRibbonPath(source, target, startWidth, endWidth = EDGE_END
   const nx = -uy;
   const ny = ux;
 
-  // A short bridge retains its body; a stretched bridge develops a thin neck.
-  // Normalize by node size so the material behaves consistently at every scale.
-  const compactness = 1 / (1 + gap / Math.max(1, (sourceRadius + targetRadius) * 0.7));
-  // Add a radius-proportional attachment width while retaining traffic weight.
-  const attachmentWidth = startWidth + sourceRadius * 0.4;
-  const startHalf = Math.min(attachmentWidth * (1 + 0.35 * compactness) / 2, sourceRadius * 0.65);
-  const endHalf = Math.min(endWidth * (0.55 + 0.45 * compactness) / 2, startHalf, targetRadius * 0.4);
-  const neckHalf = endHalf + (startHalf - endHalf) * (0.12 + 0.5 * compactness);
+  const startHalf = Math.min(startWidth / 2, sourceRadius * 0.32);
+  const endHalf = Math.min(Math.max(0.65, endWidth / 2), startHalf * 0.42, targetRadius * 0.11);
 
-  // Sink each cap slightly into its bubble so the glue stays attached.
-  const sourceOffset = Math.sqrt(Math.max(0, sourceRadius ** 2 - startHalf ** 2)) - 0.5;
-  const targetOffset = Math.sqrt(Math.max(0, targetRadius ** 2 - endHalf ** 2)) - 0.5;
+  const sourceOffset = Math.sqrt(Math.max(0, sourceRadius ** 2 - startHalf ** 2)) + 0.6;
+  const targetOffset = Math.sqrt(Math.max(0, targetRadius ** 2 - endHalf ** 2)) + 0.8;
   const sourceX = sx + ux * sourceOffset;
   const sourceY = sy + uy * sourceOffset;
   const targetX = tx - ux * targetOffset;
   const targetY = ty - uy * targetOffset;
   const length = distance - sourceOffset - targetOffset;
   const point = (t, width) => [
-    sourceX + ux * length * t + nx * width,
-    sourceY + uy * length * t + ny * width
+    sourceX + ux * length * t + nx * (width + laneOffset * (1 - t * 0.65)),
+    sourceY + uy * length * t + ny * (width + laneOffset * (1 - t * 0.65))
   ].join(" ");
 
-  // Stable, pair-specific variation: no random changes between animation frames.
-  const names = [source.domain ?? "source", target.domain ?? "target"].sort();
-  let seed = 2166136261;
-  for (const char of names.join("|")) seed = Math.imul(seed ^ char.charCodeAt(0), 16777619) >>> 0;
-  const shape = (seed & 255) / 255;
-  const balance = ((seed >>> 8) & 255) / 255;
-  const orientation = (source.domain ?? "source") === names[0] ? 1 : -1;
-  const bend = (balance * 2 - 1) * orientation * Math.min(8, gap * 0.035, neckHalf * 0.65);
-  const shoulder = 0.09 + shape * 0.11;
-  const waist = 0.48 + balance * 0.18;
-  const asymmetry = 0.78 + shape * 0.44;
+  const shoulder = 0.16;
+  const taper = 0.66;
 
-  // Unequal shoulders and a gently bowed neck resemble stretched liquid.
-  // Both sides retain positive width and the same longitudinal control positions.
-  const tailHalf = endHalf + (neckHalf - endHalf) * 0.25;
   return `M ${point(0, startHalf)}
-    C ${point(shoulder, bend * 0.45 + neckHalf * asymmetry)} ${point(waist, bend + tailHalf)} ${targetX + nx * endHalf} ${targetY + ny * endHalf}
-    L ${targetX - nx * endHalf} ${targetY - ny * endHalf}
-    C ${point(waist, bend - tailHalf)} ${point(shoulder, bend * 0.45 - neckHalf * (2 - asymmetry))} ${point(0, -startHalf)}
+    C ${point(shoulder, startHalf * 0.68)} ${point(taper, endHalf * 1.35)} ${targetX + nx * (endHalf + laneOffset * 0.35)} ${targetY + ny * (endHalf + laneOffset * 0.35)}
+    L ${targetX + nx * (laneOffset * 0.35 - endHalf)} ${targetY + ny * (laneOffset * 0.35 - endHalf)}
+    C ${point(taper, -endHalf * 1.35)} ${point(shoulder, -startHalf * 0.68)} ${point(0, -startHalf)}
     Z`;
+}
+
+function updateDirectionalEdgePath(pair, element, source, target, count, laneOffset) {
+  if (!element) return;
+  if (!count) {
+    element.setAttribute("d", "");
+    return;
+  }
+
+  element.setAttribute(
+    "d",
+    createTaperedRibbonPath(
+      source,
+      target,
+      calculateDirectionalEdgeStartWidth(count),
+      1.55,
+      laneOffset
+    )
+  );
+}
+
+function updateEdgePairPaths(pair) {
+  const geometryKey = [pair.nodeA, pair.nodeB].flatMap(node => [
+    node?.renderX ?? node?.screenX, node?.renderY ?? node?.screenY,
+    node?.renderRadius ?? node?.screenRadius, node?.renderZ ?? node?.z
+  ]).concat(pair.aToB, pair.bToA).join(",");
+  if (pair.geometryKey === geometryKey) return;
+  pair.geometryKey = geometryKey;
+  if (pair.groupElement) pair.groupElement.style.opacity = String(
+    calculateEdgeDepthOpacity(
+      pair.nodeA,
+      pair.nodeB
+    )
+  );
+
+
+  const hasBothDirections = pair.aToB > 0 && pair.bToA > 0;
+  const laneOffset = hasBothDirections ? 3.8 : 0;
+
+  updateDirectionalEdgePath(
+    pair,
+    pair.aToBElement,
+    pair.nodeA,
+    pair.nodeB,
+    pair.aToB,
+    laneOffset
+  );
+
+  updateDirectionalEdgePath(
+    pair,
+    pair.bToAElement,
+    pair.nodeB,
+    pair.nodeA,
+    pair.bToA,
+    laneOffset
+  );
 }
 
 
@@ -4907,31 +4994,17 @@ function startAnimation(
 
   let lastFrame =
     0;
+  let lastAmbientFrame = 0;
 
 
   function animate(
     now
   ) {
 
-    /*
-     * 약 30 FPS로 업데이트한다.
-     */
-    if (
-      now -
-      lastFrame <
-      33
-    ) {
-
-      animationFrameId =
-        requestAnimationFrame(
-          animate
-        );
-
-
-      return;
-    }
-
-
+    const elapsed = lastFrame ? Math.min(64, now - lastFrame) : 1000 / 60;
+    const hoverEasing = 1 - Math.pow(1 - HOVER_DEPTH_EASING, elapsed / 33);
+    const updateAmbient = now - lastAmbientFrame >= 33;
+    if (updateAmbient) lastAmbientFrame = now;
     lastFrame =
       now;
 
@@ -4944,6 +5017,8 @@ function startAnimation(
       const node
       of nodes
     ) {
+      // Pointer focus updates at display cadence; quiet wobble stays at 30Hz.
+      if (!updateAmbient && !node.hovered && node.hoverProgress === 0) continue;
 
       // ==================================================
       // Hover depth
@@ -4962,7 +5037,7 @@ function startAnimation(
           targetHover -
           node.hoverProgress
         ) *
-        HOVER_DEPTH_EASING;
+        hoverEasing;
 
 
       if (
@@ -5038,7 +5113,8 @@ function startAnimation(
 
 
       if (
-        WOBBLE_ENABLED
+        WOBBLE_ENABLED &&
+        !prefersReducedMotion
       ) {
 
         freeX +=
@@ -5156,12 +5232,10 @@ function startAnimation(
         node.domGroup
       ) {
 
-        node.domGroup.setAttribute(
-          "opacity",
-          String(
-            renderOpacity
-          )
-        );
+        const opacity = String(renderOpacity);
+        if (node.domGroup.getAttribute("opacity") !== opacity) {
+          node.domGroup.setAttribute("opacity", opacity);
+        }
       }
 
 
@@ -5173,10 +5247,7 @@ function startAnimation(
         node.domGroup
       ) {
 
-        node.domGroup.setAttribute(
-          "transform",
-
-          `
+        const transform = `
             translate(
               ${x}
               ${y}
@@ -5190,8 +5261,10 @@ function startAnimation(
               ${-node.screenX}
               ${-node.screenY}
             )
-          `
-        );
+          `;
+        if (node.domGroup.getAttribute("transform") !== transform) {
+          node.domGroup.setAttribute("transform", transform);
+        }
       }
 
 
@@ -5234,7 +5307,8 @@ function startAnimation(
      * 겹친 노드가 있어도 focus 노드가 가려지지 않는다.
      */
     if (
-      hoveredNode?.domGroup
+      hoveredNode?.domGroup &&
+      hoverLayer.lastElementChild !== hoveredNode.domGroup
     ) {
 
       hoverLayer.appendChild(
@@ -5271,13 +5345,9 @@ function startAnimation(
       of edgePairs
     ) {
 
-      if (pair.lineElement) {
-        pair.lineElement.setAttribute("d", createSimpleEdgePath(pair.nodeA, pair.nodeB));
-      }
-      if (pair.gelElement) {
-        updateEdgeGelMaterial(pair);
-        syncEdgeGlass(pair);
-      }
+      updateEdgePairPaths(
+        pair
+      );
 
     }
 
@@ -5616,6 +5686,41 @@ function showNodeDetail(
     node.domain;
 
 
+  const siteHeader =
+    document.createElement(
+      "div"
+    );
+
+
+  siteHeader.className =
+    "detail-site-header";
+
+
+  const faviconShell =
+    document.createElement(
+      "span"
+    );
+
+
+  faviconShell.className =
+    "detail-site-favicon-shell";
+
+
+  faviconShell.appendChild(
+    createFaviconImageElement(
+      node,
+      "detail-site-favicon",
+      48
+    )
+  );
+
+
+  siteHeader.append(
+    faviconShell,
+    title
+  );
+
+
   const stats =
     document.createElement(
       "div"
@@ -5708,7 +5813,7 @@ function showNodeDetail(
 
   detailElement.append(
     eyebrow,
-    title,
+    siteHeader,
     stats
   );
 
@@ -5844,6 +5949,53 @@ function createRelatedSiteButton(domain, count, graph) {
     if (node) selectNode(node, graph, { toggle: false });
   });
   return button;
+}
+
+function createFaviconImageElement(node, className, size = 32) {
+  const image =
+    document.createElement(
+      "img"
+    );
+
+
+  image.className =
+    className;
+
+
+  image.alt =
+    "";
+
+
+  image.loading =
+    "lazy";
+
+
+  image.decoding =
+    "async";
+
+
+  image.src =
+    createChromeFaviconUrl(
+      node.faviconPageUrl ??
+        `https://${node.domain}`,
+      size
+    );
+
+
+  image.addEventListener(
+    "error",
+    () => {
+      image.hidden =
+        true;
+    },
+    {
+      once:
+        true
+    }
+  );
+
+
+  return image;
 }
 
 function renderRanking(
@@ -6006,6 +6158,25 @@ function renderRanking(
         "ranking-domain-row";
 
 
+      const faviconShell =
+        document.createElement(
+          "span"
+        );
+
+
+      faviconShell.className =
+        "ranking-favicon-shell";
+
+
+      faviconShell.appendChild(
+        createFaviconImageElement(
+          node,
+          "ranking-favicon",
+          32
+        )
+      );
+
+
       const domain =
         document.createElement(
           "span"
@@ -6078,6 +6249,7 @@ function renderRanking(
 
 
       topRow.append(
+        faviconShell,
         domain,
         score
       );
@@ -6525,41 +6697,54 @@ function renderGraph(
     group.dataset.b =
       pair.b;
 
-    const line = createSvgElement("path");
-    line.setAttribute("class", "edge-line");
-    line.style.strokeWidth = `${calculateSimpleEdgeWidth(pair.aToB + pair.bToA)}px`;
-    line.setAttribute("d", createSimpleEdgePath(a, b));
-    group.appendChild(line);
-    pair.lineElement = line;
+    pair.groupElement =
+      group;
+
+    const aToB =
+      createSvgElement(
+        "path"
+      );
 
 
-    const gel = createSvgElement("path");
-    gel.setAttribute("class", "edge-ribbon");
-    const surface = createLensSurface(defs, `edge-refraction-${edgePairs.indexOf(pair)}`);
-    surface.group.setAttribute("class", "edge-glass");
-    surface.image.setAttribute("class", "edge-refracted-background");
-    pair.lensSurface = surface;
-    pair.glassElement = createSvgElement("path");
-    pair.glassElement.setAttribute("fill", "url(#edgeGlassLight)");
-    pair.glassElement.setAttribute("opacity", "0.65");
-    surface.group.appendChild(pair.glassElement);
-    pair.reflectionElement = createSvgElement("path");
-    pair.reflectionElement.setAttribute("fill", "none");
-    pair.reflectionElement.setAttribute("stroke", "url(#edgeReflection)");
-    pair.reflectionElement.setAttribute("stroke-width", "1.6");
-    surface.group.appendChild(pair.reflectionElement);
-    surface.overlays.push(pair.glassElement, pair.reflectionElement);
-    pair.shadowElement = createSvgElement("path");
-    pair.shadowElement.setAttribute("class", "edge-glass-shadow");
-    pair.shadowElement.setAttribute("fill", "black");
-    pair.shadowElement.setAttribute("opacity", "0.38");
-    pair.shadowElement.setAttribute("filter", "url(#edgeSoftShadow)");
-    group.appendChild(pair.shadowElement);
-    group.appendChild(surface.group);
-    group.appendChild(gel);
-    pair.gelElement = gel;
-    updateEdgeGelMaterial(pair);
-    syncEdgeGlass(pair);
+    aToB.setAttribute(
+      "class",
+      "edge-ribbon edge-ribbon--forward"
+    );
+
+    aToB.dataset.direction =
+      `${pair.a}→${pair.b}`;
+
+
+    const bToA =
+      createSvgElement(
+        "path"
+      );
+
+
+    bToA.setAttribute(
+      "class",
+      "edge-ribbon edge-ribbon--reverse"
+    );
+
+    bToA.dataset.direction =
+      `${pair.b}→${pair.a}`;
+
+
+    group.append(
+      aToB,
+      bToA
+    );
+
+
+    pair.aToBElement =
+      aToB;
+
+
+    pair.bToAElement =
+      bToA;
+
+
+    updateEdgePairPaths(pair);
 
 
     edgeLayer.appendChild(
@@ -6731,6 +6916,55 @@ group.appendChild(
 );
 
 
+      const brandGradient =
+        createBrandGradient(
+          defs,
+          index
+        );
+
+
+      const brandGlow =
+        createSvgElement(
+          "circle"
+        );
+
+
+      brandGlow.setAttribute(
+        "cx",
+        node.screenX
+      );
+
+
+      brandGlow.setAttribute(
+        "cy",
+        node.screenY
+      );
+
+
+      brandGlow.setAttribute(
+        "r",
+        node.screenRadius *
+          1.08
+      );
+
+
+      brandGlow.setAttribute(
+        "fill",
+        `url(#${brandGradient.id})`
+      );
+
+
+      brandGlow.setAttribute(
+        "class",
+        "node-brand-glow"
+      );
+
+
+      group.appendChild(
+        brandGlow
+      );
+
+
 
 
 
@@ -6847,7 +7081,13 @@ group.appendChild(
       );
 
 
-      bindNodeFavicon(node, favicon, fallback);
+      bindNodeFavicon(node, favicon, fallback, loadedUrl => {
+        applyBrandColor(
+          node,
+          brandGradient,
+          loadedUrl
+        );
+      });
 
       // The supplied transparent bubble is painted above the favicon.
       // Adjust this multiplier if a replacement PNG has different padding.
@@ -6860,15 +7100,8 @@ group.appendChild(
       bubble.setAttribute("height", bubbleSize);
       bubble.setAttribute("preserveAspectRatio", "xMidYMid meet");
       bubble.setAttribute("class", "node-bubble");
+      bubble.setAttribute("opacity", "0.46");
       group.appendChild(bubble);
-
-      const hoverRim = createSvgElement("circle");
-      hoverRim.setAttribute("cx", node.screenX);
-      hoverRim.setAttribute("cy", node.screenY);
-      hoverRim.setAttribute("r", node.screenRadius);
-      hoverRim.setAttribute("class", "node-hover-rim");
-      group.appendChild(hoverRim);
-
 
       // ----------------------------------------------
       // Domain Label

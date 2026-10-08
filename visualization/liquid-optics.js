@@ -85,13 +85,24 @@ function setLensBounds(surface, bounds) {
 function updateNodeLens(node) {
   const surface = node.lensSurface;
   if (!surface) return;
+  // Keep optical rasterization local to the user's current focus.
+  const active = node.hovered || node.hoverProgress > 0.002 ||
+    node.domGroup.classList.contains("is-selected");
+  const display = active ? "" : "none";
+  if (surface.group.style.display !== display) surface.group.style.display = display;
+  if (!active) return;
   const x = node.renderX ?? node.screenX, y = node.renderY ?? node.screenY;
   const r = node.renderRadius ?? node.screenRadius;
-  surface.shape.setAttribute("d", `M ${x-r} ${y} a ${r} ${r} 0 1 0 ${2*r} 0 a ${r} ${r} 0 1 0 ${-2*r} 0`);
-  setLensBounds(surface, {x:x-r,y:y-r,width:r*2,height:r*2});
+  const boundsKey = `${x},${y},${r}`;
+  if (surface.boundsKey !== boundsKey) {
+    surface.shape.setAttribute("d", `M ${x-r} ${y} a ${r} ${r} 0 1 0 ${2*r} 0 a ${r} ${r} 0 1 0 ${-2*r} 0`);
+    setLensBounds(surface, {x:x-r,y:y-r,width:r*2,height:r*2});
+    surface.boundsKey = boundsKey;
+  }
   if (!surface.map.hasAttribute("href")) surface.map.setAttribute("href", getCircularLensMap());
   const dimmed = node.domGroup.classList.contains("dimmed") && !node.hovered;
-  surface.group.setAttribute("opacity", dimmed ? "0.09" : "1");
+  const opacity = dimmed ? "0.09" : "1";
+  if (surface.group.getAttribute("opacity") !== opacity) surface.group.setAttribute("opacity", opacity);
 }
 
 function updateBridgeLens(pair) {
