@@ -137,6 +137,12 @@ async function openPage(browser, port) {
 async function settleViewport(page, width, height) {
   await page.setViewportSize({ width, height });
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert(await page.evaluate(() => {
+    const workspace=document.querySelector('#workspace').getBoundingClientRect();
+    const player=document.querySelector('#historyTools').getBoundingClientRect();
+    return player.top >= workspace.bottom - 1 &&
+      (innerWidth < 720 || player.bottom <= innerHeight + 1);
+  }), 'Replay player is below workspace and fits desktop/tablet viewport');
 }
 
 function assertScreenshotWidth(buffer, width, label) {
@@ -212,6 +218,32 @@ function assertScreenshotWidth(buffer, width, label) {
     }), 'Bidirectional navigation must render as separate directional edge paths');
 
     await settleViewport(page, 1440, 900);
+    assert(await page.evaluate(() => {
+      const paths = [...document.querySelectorAll('.edge-ribbon')];
+      return paths.every(path => getComputedStyle(path).fill.includes('cosmicRoute')) &&
+        document.querySelectorAll('.edge-route-glow').length === paths.length * 2 &&
+        !document.querySelector('.edge-luminous-core') &&
+        document.querySelector('.map-background').getAttribute('href').includes('cosmic-background-v2.png');
+    }), 'Cosmic routes use gradients with reusable halos and the dedicated sky texture');
+    assert(await page.evaluate(() => {
+      const textures = [...document.querySelectorAll('.edge-milky-texture')];
+      return textures.length > 0 && textures.every(path => getComputedStyle(path).fill.includes('milkyWayTexture')) &&
+        document.querySelector('#milkyWayTexture image').getAttribute('href').startsWith('data:image/png') &&
+        [...document.querySelectorAll('.edge-milky-flow')].every(path => getComputedStyle(path).display === 'none') &&
+        !document.querySelector('script[src="edge-routing.js"]');
+    }), 'Straight routes share one static texture and do not animate overview');
+    await page.evaluate(() => {
+      const rect = svg.getBoundingClientRect();
+      svg.dispatchEvent(new PointerEvent('pointermove', {clientX: rect.right - 1,
+        clientY: rect.bottom - 1, pointerType: 'mouse', bubbles: true}));
+    });
+    await page.waitForFunction(() => skyPointer.x > 2 && skyPointer.y > 2);
+    assert(await page.evaluate(() => Math.abs(skyPointer.x) <= 5 && Math.abs(skyPointer.y) <= 5),
+      'Background pointer parallax remains within five screen pixels');
+    await page.emulateMedia({reducedMotion: 'reduce'});
+    await page.evaluate(() => svg.dispatchEvent(new PointerEvent('pointerleave')));
+    await page.waitForFunction(() => skyPointer.x === 0 && skyPointer.y === 0 && skyPointer.frame === null);
+    await page.emulateMedia({reducedMotion: 'no-preference'});
     assert(await page.evaluate(() =>
       [...document.querySelectorAll('.node-lens-layer > g')]
         .every(lens => getComputedStyle(lens).display === 'none') &&
@@ -225,6 +257,9 @@ function assertScreenshotWidth(buffer, width, label) {
     assertScreenshotWidth(overviewScreenshot, 1440, 'overview desktop');
 
     await page.locator('.ranking-item').first().click();
+    assert(await page.evaluate(() => [...document.querySelectorAll('.edge-milky-flow')].some(path =>
+      path.closest('.edge-highlight') && getComputedStyle(path).animationName === 'milky-route-flow')),
+      'Selected routes alone show slow light flow');
     await page.waitForFunction(() =>
       [...document.querySelectorAll('.node-lens-layer > g')]
         .filter(lens => getComputedStyle(lens).display !== 'none').length === 1
@@ -238,8 +273,34 @@ function assertScreenshotWidth(buffer, width, label) {
         [...group.querySelectorAll('.edge-ribbon[data-direction], .edge-line, .edge-direction, .edge-taper')]
           .some(path => getComputedStyle(path).display !== 'none')
       );
-      return visibleDirectional && !oldGlueVisible;
+      return visibleDirectional && !oldGlueVisible &&
+        highlighted.every(group => [...group.querySelectorAll('.edge-ribbon')]
+          .every(path => getComputedStyle(path).fill.includes('cosmicRoute') &&
+            getComputedStyle(path).filter === 'none'));
     }), 'Selection must brighten directional edges without enabling glue bridge elements');
+
+    assert(await page.evaluate(async () => {
+      const groups = [...document.querySelectorAll('.node-group')];
+      const selected = groups.find(group => group.classList.contains('is-selected'));
+      const neighbor = groups.find(group => group.classList.contains('is-connected'));
+      const other = groups.find(group => group.classList.contains('dimmed'));
+      const opacity = group => Number(getComputedStyle(group).opacity);
+      await new Promise(resolve => setTimeout(resolve, 500));
+      if (!selected || !neighbor || !other || opacity(selected) !== 1 ||
+          opacity(neighbor) !== 0.72 || opacity(other) !== 0.4) return false;
+      const domain = selected.dataset.domain;
+      const graph = {edges: [...document.querySelectorAll('.edge-pair')].map(pair =>
+        ({source: pair.dataset.a, target: pair.dataset.b}))};
+      highlightNode(domain, graph, true);
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const replayCorrect = groups.filter(group => group.classList.contains('is-selected')).length === 1 &&
+        groups.every(group => !group.classList.contains('is-connected')) &&
+        groups.filter(group => group !== selected).every(group => opacity(group) === 0.16);
+      clearSelection();
+      const resetCorrect = groups.every(group => !group.matches('.is-connected, .is-replay-dimmed, .dimmed, .is-selected'));
+      return replayCorrect && resetCorrect;
+    }), 'Selection preserves three brightness tiers; replay highlights one node; clearing removes all focus classes');
+    await page.locator('.ranking-item').first().click();
 
     for (const [width, height] of [[1440, 900], [1100, 620], [1024, 768], [390, 844]]) {
       await settleViewport(page, width, height);

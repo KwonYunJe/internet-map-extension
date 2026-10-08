@@ -73,7 +73,7 @@ function detectBackgroundStars() {
       }
     };
     image.onerror = () => resolve(null);
-    image.src = chrome.runtime.getURL("visualization/assets/background.png");
+    image.src = chrome.runtime.getURL("visualization/assets/cosmic-background-v2.png");
   });
 }
 

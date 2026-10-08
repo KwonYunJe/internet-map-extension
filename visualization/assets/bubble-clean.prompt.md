@@ -1,5 +1,0 @@
-Generated with the built-in image_gen tool, transparent_background=true.
-Asset: bubble-clean.png. Original five bubble PNGs retained.
-
-Prompt:
-Use case: stylized-concept. Asset type: transparent PNG bubble rim overlay for interactive UI nodes. Generate one premium clean perfectly circular clear water bubble centered in a square canvas, outer diameter exactly about 84% of canvas width. Truly transparent background AND truly transparent clear center, not a white or gray filled disk. Only a very thin delicate neutral silver-white glass rim and a few soft natural crescent specular reflections close to the rim. No milky fill, no cloudy interior, no stars, no background reflections, no extra bubbles, no colors, no text. The central 70% diameter must be fully transparent to reveal a site favicon and realtime refracted background rendered beneath it. Outer rim subtly organic highlights but silhouette circular. Crisp polished photoreal water film overlay. Save the PNG and return its local file path for copying into project assets.
