@@ -198,7 +198,9 @@ const EDGE_MAX_START_WIDTH =
 // ==================================================
 
 const WOBBLE_ENABLED =
-  true;
+  false;
+
+let edgeCanvasLayer = null;
 
 const reducedMotionQuery =
   window.matchMedia?.(
@@ -3592,8 +3594,8 @@ function syncEdgeGlass(pair) { updateBridgeLens(pair); }
 
 function calculateDirectionalEdgeStartWidth(count) {
   return Math.min(
-    18,
-    3.2 + Math.log2(Math.max(1, count) + 1) * 2.15
+    24,
+    6 + Math.log2(Math.max(1, count) + 1) * 2.3
   );
 }
 
@@ -3626,7 +3628,7 @@ function calculateEdgeDepthOpacity(source, target) {
 
 function createMapBackgroundImage() {
   const image = createSvgElement("image");
-  image.setAttribute("href", chrome.runtime.getURL("visualization/assets/background.png"));
+  image.setAttribute("href", chrome.runtime.getURL("visualization/assets/cosmic-background-v2.png"));
   image.setAttribute("x", "0");
   image.setAttribute("y", "0");
   image.setAttribute("width", WIDTH);
@@ -3717,8 +3719,12 @@ function createTaperedRibbonPath(source, target, startWidth, endWidth = EDGE_END
   const nx = -uy;
   const ny = ux;
 
-  const startHalf = Math.min(startWidth / 2, sourceRadius * 0.32);
-  const endHalf = Math.min(Math.max(0.65, endWidth / 2), startHalf * 0.42, targetRadius * 0.11);
+  // Both attachments follow their own node, rather than navigation frequency.
+  const startHalf = sourceRadius * 0.3;
+  const endHalf = targetRadius * 0.3;
+  const compactness = 1 / (1 + gap / Math.max(1, sourceRadius + targetRadius));
+  const neck = Math.min(startHalf, endHalf, Math.max(1.8,
+    Math.min(3.5, Math.min(startHalf, endHalf) * (0.18 + compactness * 0.3))));
 
   const sourceOffset = Math.sqrt(Math.max(0, sourceRadius ** 2 - startHalf ** 2)) + 0.6;
   const targetOffset = Math.sqrt(Math.max(0, targetRadius ** 2 - endHalf ** 2)) + 0.8;
@@ -3732,13 +3738,12 @@ function createTaperedRibbonPath(source, target, startWidth, endWidth = EDGE_END
     sourceY + uy * length * t + ny * (width + laneOffset * (1 - t * 0.65))
   ].join(" ");
 
-  const shoulder = 0.16;
-  const taper = 0.66;
-
   return `M ${point(0, startHalf)}
-    C ${point(shoulder, startHalf * 0.68)} ${point(taper, endHalf * 1.35)} ${targetX + nx * (endHalf + laneOffset * 0.35)} ${targetY + ny * (endHalf + laneOffset * 0.35)}
-    L ${targetX + nx * (laneOffset * 0.35 - endHalf)} ${targetY + ny * (laneOffset * 0.35 - endHalf)}
-    C ${point(taper, -endHalf * 1.35)} ${point(shoulder, -startHalf * 0.68)} ${point(0, -startHalf)}
+    C ${point(0.08, startHalf * 0.32)} ${point(0.32, neck)} ${point(0.5, neck)}
+    C ${point(0.68, neck)} ${point(0.92, endHalf * 0.32)} ${point(1, endHalf)}
+    L ${point(1, -endHalf)}
+    C ${point(0.92, -endHalf * 0.32)} ${point(0.68, -neck)} ${point(0.5, -neck)}
+    C ${point(0.32, -neck)} ${point(0.08, -startHalf * 0.32)} ${point(0, -startHalf)}
     Z`;
 }
 
@@ -3755,7 +3760,7 @@ function updateDirectionalEdgePath(pair, element, source, target, count, laneOff
       source,
       target,
       calculateDirectionalEdgeStartWidth(count),
-      1.55,
+      4.4,
       laneOffset
     )
   );
@@ -3777,7 +3782,7 @@ function updateEdgePairPaths(pair) {
 
 
   const hasBothDirections = pair.aToB > 0 && pair.bToA > 0;
-  const laneOffset = hasBothDirections ? 3.8 : 0;
+  const laneOffset = hasBothDirections ? 1.5 : 0;
 
   updateDirectionalEdgePath(
     pair,
@@ -3796,6 +3801,11 @@ function updateEdgePairPaths(pair) {
     pair.bToA,
     laneOffset
   );
+  [pair.aToBElement, pair.bToAElement].forEach((element, index) => {
+    const d = element?.getAttribute("d") || "";
+    pair.milkyElements?.[index].setAttribute("d", d);
+    pair.flowElements?.[index].setAttribute("d", d);
+  });
 }
 
 
@@ -4994,7 +5004,12 @@ function startAnimation(
 
   let lastFrame =
     0;
-  let lastAmbientFrame = 0;
+  const incidentPairs = new Map(nodes.map(node => [node, []]));
+  for (const pair of edgePairs) {
+    incidentPairs.get(pair.nodeA)?.push(pair);
+    incidentPairs.get(pair.nodeB)?.push(pair);
+  }
+  let firstFrame = true;
 
 
   function animate(
@@ -5003,8 +5018,7 @@ function startAnimation(
 
     const elapsed = lastFrame ? Math.min(64, now - lastFrame) : 1000 / 60;
     const hoverEasing = 1 - Math.pow(1 - HOVER_DEPTH_EASING, elapsed / 33);
-    const updateAmbient = now - lastAmbientFrame >= 33;
-    if (updateAmbient) lastAmbientFrame = now;
+    const dirtyPairs = new Set();
     lastFrame =
       now;
 
@@ -5017,8 +5031,11 @@ function startAnimation(
       const node
       of nodes
     ) {
-      // Pointer focus updates at display cadence; quiet wobble stays at 30Hz.
-      if (!updateAmbient && !node.hovered && node.hoverProgress === 0) continue;
+      // Selection can change without geometry changing; keep the focused lens in sync.
+      updateNodeLens(node);
+      const targetProgress = node.hovered ? 1 : 0;
+      if (!firstFrame && node.hoverProgress === targetProgress) continue;
+      for (const pair of incidentPairs.get(node) || []) dirtyPairs.add(pair);
 
       // ==================================================
       // Hover depth
@@ -5336,13 +5353,10 @@ function startAnimation(
     // Edge animation
     // ==================================================
 
-    /*
-     * 노드는 wobble하고 hover 시 크기도 변하므로
-     * edge도 현재 render 좌표를 따라 매 frame 다시 계산한다.
-     */
+    // Only edges incident to a node whose hover geometry changed need new paths.
     for (
       const pair
-      of edgePairs
+      of dirtyPairs
     ) {
 
       updateEdgePairPaths(
@@ -5350,6 +5364,9 @@ function startAnimation(
       );
 
     }
+
+    firstFrame = false;
+    edgeCanvasLayer?.update();
 
 
     animationFrameId =
@@ -5390,6 +5407,9 @@ function clearSelection() {
 
   selectedDomain =
     null;
+
+  document.querySelectorAll(".node-group").forEach(group =>
+    group.classList.remove("is-connected", "is-replay-dimmed"));
 
   document.querySelectorAll(".node-group.is-selected, .ranking-item.is-selected")
     .forEach(element => element.classList.remove("is-selected"));
@@ -5493,6 +5513,9 @@ function highlightNode(
       group => {
 
         group.classList.toggle("is-selected", group.dataset.domain === domain);
+        group.classList.toggle("is-connected", !singleNode &&
+          group.dataset.domain !== domain && connected.has(group.dataset.domain));
+        group.classList.toggle("is-replay-dimmed", singleNode && group.dataset.domain !== domain);
 
         group.classList.toggle(
           "dimmed",
@@ -6297,6 +6320,46 @@ function renderRanking(
 // SVG Definitions
 // ==================================================
 
+let milkyWayTexture;
+let cosmicNodeGlowTexture;
+function getCosmicNodeGlowTexture() {
+  if (cosmicNodeGlowTexture) return cosmicNodeGlowTexture;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 256;
+  const context = canvas.getContext("2d");
+  const glow = context.createRadialGradient(128,128,0,128,128,128);
+  for (const [position,color] of [[0,"rgba(35,90,255,0)"],[.48,"rgba(35,90,255,0)"],
+    [.57,"rgba(55,130,255,.3)"],[.625,"rgba(107,215,255,.95)"],
+    [.66,"rgba(62,140,255,.65)"],[.76,"rgba(125,85,255,.22)"],[1,"rgba(100,70,255,0)"]]) {
+    glow.addColorStop(position,color);
+  }
+  context.fillStyle=glow; context.fillRect(0,0,256,256);
+  return cosmicNodeGlowTexture=canvas.toDataURL();
+}
+function getMilkyWayTexture() {
+  if (milkyWayTexture) return milkyWayTexture;
+  const canvas = document.createElement("canvas");
+  canvas.width = 256; canvas.height = 64;
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#244984"; context.fillRect(0, 0, 256, 64);
+  let seed = 421;
+  const random = () => ((seed = Math.imul(seed, 1664525) + 1013904223 >>> 0) / 4294967296);
+  for (let i = 0; i < 24; i++) {
+    const x = random() * 256, y = random() * 64, radius = 12 + random() * 35;
+    const glow = context.createRadialGradient(x,y,0,x,y,radius);
+    glow.addColorStop(0, i%2 ? "rgba(174,139,255,.68)" : "rgba(125,225,255,.56)");
+    glow.addColorStop(1, "rgba(50,70,150,0)");
+    context.fillStyle = glow; context.fillRect(0,0,256,64);
+  }
+  for (let i = 0; i < 96; i++) {
+    context.fillStyle = `rgba(255,255,255,${0.85+random()*0.15})`;
+    const x = Math.floor(random()*256), y = Math.floor(random()*64);
+    const size = random() > 0.8 ? 2 : 1;
+    context.fillRect(x,y,size,size);
+  }
+  return milkyWayTexture = canvas.toDataURL();
+}
+
 function createDefinitions() {
 
   const defs =
@@ -6306,6 +6369,13 @@ function createDefinitions() {
 
 
   defs.innerHTML = `
+
+    <linearGradient id="cosmicRouteForward" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop stop-color="#598bff"/><stop offset=".48" stop-color="#aa86ff"/><stop offset="1" stop-color="#67e5ff"/>
+    </linearGradient>
+    <linearGradient id="cosmicRouteReverse" x1="100%" y1="100%" x2="0%" y2="0%">
+      <stop stop-color="#67e5ff"/><stop offset=".5" stop-color="#768aff"/><stop offset="1" stop-color="#d29bff"/>
+    </linearGradient>
 
     <linearGradient id="edgeGlassLight" x1="0%" y1="0%" x2="35%" y2="100%">
       <stop offset="0%" stop-color="white" stop-opacity="0.12" />
@@ -6447,9 +6517,15 @@ function createDefinitions() {
   `;
 
 
-  svg.appendChild(
-    defs
-  );
+  const pattern = createSvgElement("pattern");
+  pattern.id = "milkyWayTexture";
+  pattern.setAttribute("patternUnits", "userSpaceOnUse");
+  pattern.setAttribute("width", "256"); pattern.setAttribute("height", "64");
+  const texture = createSvgElement("image");
+  texture.setAttribute("href", getMilkyWayTexture());
+  texture.setAttribute("width", "256"); texture.setAttribute("height", "64");
+  pattern.appendChild(texture); defs.appendChild(pattern);
+  svg.appendChild(defs);
 
 
   return defs;
@@ -6464,6 +6540,9 @@ function renderGraph(
   graph,
   range
 ) {
+
+  edgeCanvasLayer?.destroy();
+  edgeCanvasLayer = null;
 
   if (
     animationFrameId
@@ -6612,6 +6691,7 @@ function renderGraph(
   }
 
 
+
   edgePairs.sort(
     (
       a,
@@ -6730,10 +6810,25 @@ function renderGraph(
       `${pair.b}→${pair.a}`;
 
 
-    group.append(
-      aToB,
-      bToA
-    );
+    // Reuse each path's geometry for a soft layered halo, without blur filters.
+    const halos = [aToB, bToA].flatMap((path, direction) => {
+      path.id = `cosmic-route-${edgeLayer.childElementCount}-${direction}`;
+      return ["outer", "inner"].map(level => {
+        const halo = createSvgElement("use");
+        halo.setAttribute("href", `#${path.id}`);
+        halo.setAttribute("class", `edge-route-glow edge-route-glow--${level} ${direction ? "edge-route-glow--reverse" : "edge-route-glow--forward"}`);
+        return halo;
+      });
+    });
+    const makeOverlay = className => [0,1].map(() => {
+      const path = createSvgElement("path");
+      path.setAttribute("class", className);
+      path.setAttribute("pointer-events", "none");
+      return path;
+    });
+    pair.milkyElements = makeOverlay("edge-milky-texture");
+    pair.flowElements = makeOverlay("edge-milky-flow");
+    group.append(...halos, aToB, bToA, ...pair.milkyElements, ...pair.flowElements);
 
 
     pair.aToBElement =
@@ -6756,6 +6851,8 @@ function renderGraph(
   svg.appendChild(
     edgeLayer
   );
+
+  edgeCanvasLayer = createEdgeCanvasLayer(svg, edgeLayer, edgePairs);
 
 
   // ==================================================
@@ -6864,7 +6961,7 @@ const hoverGlow =
 
 hoverGlow.setAttribute(
   "href",
-  NODE_GLOW_TEXTURE_URL
+  getCosmicNodeGlowTexture()
 );
 
 
@@ -7177,8 +7274,13 @@ group.appendChild(
   // Pointer interaction
   // ==================================================
 
-  svg.onpointermove =
-    event => {
+  let pendingPointer = null;
+  let pointerFrame = null;
+  const processPointer = () => {
+      pointerFrame = null;
+      const event = pendingPointer;
+      pendingPointer = null;
+      if (!event || !svg.contains(nodeLayer)) return;
 
       const point =
         getSvgPointerPosition(
@@ -7216,9 +7318,19 @@ group.appendChild(
           : "default";
     };
 
+  svg.onpointermove = event => {
+    if (event.buttons) return;
+    pendingPointer = event;
+    if (pointerFrame === null) pointerFrame = requestAnimationFrame(processPointer);
+  };
+
 
   svg.onpointerleave =
     () => {
+
+      if (pointerFrame !== null) cancelAnimationFrame(pointerFrame);
+      pointerFrame = null;
+      pendingPointer = null;
 
       setHoveredNode(
         null,

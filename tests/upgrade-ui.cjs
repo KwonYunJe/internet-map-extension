@@ -137,7 +137,7 @@ const assert = require('node:assert/strict');
       const widths=[1,2,10,100,100000].map(calculateDirectionalEdgeStartWidth);
       const a={screenX:0,screenY:0,screenRadius:10};
       const b={screenX:100,screenY:0,screenRadius:20};
-      return widths.every((v,i)=>v<=18 && (!i||v>=widths[i-1])) &&
+      return widths.every((v,i)=>v<=24 && (!i||v>=widths[i-1])) &&
         createTaperedRibbonPath(a,b,8,3).startsWith('M ') &&
         createTaperedRibbonPath(a,{...b,screenX:20},8,3)==='' &&
         createEdgePairs([{source:'a',target:'b',count:2},{source:'b',target:'a',count:3}]).length===1;

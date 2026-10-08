@@ -4,26 +4,61 @@ let mapZoomFrame = null;
 let mapZoomTarget = {x:0,y:0,width:1200,height:700};
 let mapPan = null;
 const BACKGROUND_PARALLAX = 0.3;
+const skyPointer = {x: 0, y: 0, targetX: 0, targetY: 0, frame: null};
+const skyMotionQuery = matchMedia("(prefers-reduced-motion: reduce)");
+skyMotionQuery.addEventListener("change", event => {
+  if (event.matches) targetSkyPointer(0, 0);
+});
 
-function positionMapBackground(image) {
+function easeSkyPointer() {
+  const reduced = skyMotionQuery.matches;
+  if (reduced) skyPointer.targetX = skyPointer.targetY = 0;
+  skyPointer.x += (skyPointer.targetX - skyPointer.x) * (reduced ? 1 : 0.07);
+  skyPointer.y += (skyPointer.targetY - skyPointer.y) * (reduced ? 1 : 0.07);
+  positionMapBackgrounds();
+  if (Math.abs(skyPointer.x - skyPointer.targetX) + Math.abs(skyPointer.y - skyPointer.targetY) > 0.02) {
+    skyPointer.frame = requestAnimationFrame(easeSkyPointer);
+  } else skyPointer.frame = null;
+}
+
+function targetSkyPointer(x, y) {
+  skyPointer.targetX = x; skyPointer.targetY = y;
+  if (skyPointer.frame == null) skyPointer.frame = requestAnimationFrame(easeSkyPointer);
+}
+
+function mapBackgroundBounds() {
   const box = svg.viewBox.baseVal;
   const ratio = box.width / WIDTH;
   const scale = BACKGROUND_PARALLAX + (1 - BACKGROUND_PARALLAX) * ratio;
   // SVG meet keeps nodes circular; extend the shared background into any
   // letterbox area created by a responsive frame with a different aspect ratio.
-  const pixelsPerUnit = Math.min(svg.clientWidth/box.width, svg.clientHeight/box.height);
-  const extraX = pixelsPerUnit > 0 ? Math.max(0,svg.clientWidth/pixelsPerUnit-box.width) : 0;
-  const extraY = pixelsPerUnit > 0 ? Math.max(0,svg.clientHeight/pixelsPerUnit-box.height) : 0;
-  image.setAttribute("x", (1-BACKGROUND_PARALLAX)*box.x-extraX/2);
-  image.setAttribute("y", (1-BACKGROUND_PARALLAX)*box.y-extraY/2);
-  image.setAttribute("width", WIDTH*scale+extraX);
-  image.setAttribute("height", HEIGHT*scale+extraY);
+  const width = svg.clientWidth, height = svg.clientHeight;
+  const pixelsPerUnit = Math.min(width/box.width, height/box.height);
+  const extraX = pixelsPerUnit > 0 ? Math.max(0,width/pixelsPerUnit-box.width) : 0;
+  const extraY = pixelsPerUnit > 0 ? Math.max(0,height/pixelsPerUnit-box.height) : 0;
+  const margin = pixelsPerUnit > 0 ? 8 / pixelsPerUnit : 0;
+  return {x:(1-BACKGROUND_PARALLAX)*box.x-extraX/2-margin + skyPointer.x / (pixelsPerUnit || 1),
+    y:(1-BACKGROUND_PARALLAX)*box.y-extraY/2-margin + skyPointer.y / (pixelsPerUnit || 1),
+    width:WIDTH*scale+extraX+margin*2, height:HEIGHT*scale+extraY+margin*2};
+}
+
+function positionMapBackground(image, bounds = mapBackgroundBounds()) {
+  for (const [name, value] of Object.entries(bounds)) {
+    const text = String(value);
+    if (image.getAttribute(name) !== text) image.setAttribute(name, text);
+  }
+}
+
+function positionMapBackgrounds() {
+  // Read layout once, before writes to any of the refraction copies.
+  const bounds = mapBackgroundBounds();
+  svg.querySelectorAll("[data-map-background]").forEach(image => positionMapBackground(image, bounds));
 }
 
 function applyMapView(box) {
   svg.setAttribute("viewBox", [box.x,box.y,box.width,box.height].join(" "));
   // Match every refracted copy to the distant background's world coordinates.
-  svg.querySelectorAll("[data-map-background]").forEach(positionMapBackground);
+  positionMapBackgrounds();
 }
 
 function resetMapZoom() {
@@ -35,8 +70,21 @@ function resetMapZoom() {
 
 function initializeMapZoom() {
   resetMapZoom();
+  svg.addEventListener("pointermove", event => {
+    if (event.pointerType === "touch" || mapPan || event.buttons ||
+        skyMotionQuery.matches) return;
+    const rect = svg.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    targetSkyPointer(Math.max(-5, Math.min(5, ((event.clientX-rect.left)/rect.width-.5)*10)),
+      Math.max(-5, Math.min(5, ((event.clientY-rect.top)/rect.height-.5)*10)));
+  });
+  svg.addEventListener("pointerleave", () => targetSkyPointer(0, 0));
+  svg.addEventListener("pointerdown", () => {
+    cancelAnimationFrame(skyPointer.frame); skyPointer.frame = null;
+    skyPointer.targetX = skyPointer.x; skyPointer.targetY = skyPointer.y;
+  });
   const frameObserver = new ResizeObserver(() => {
-    svg.querySelectorAll("[data-map-background]").forEach(positionMapBackground);
+    positionMapBackgrounds();
   });
   frameObserver.observe(svg);
   svg.addEventListener("pointerdown", event => {

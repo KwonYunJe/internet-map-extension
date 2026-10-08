@@ -40,6 +40,11 @@ const path = require('node:path');
       })));
     });
     assert(assets.length>0 && assets.every(Boolean),'Bubble assets load in actual extension origin');
+    assert.equal(await page.locator('.edge-canvas').count(),1,'Canvas edge layer loads under extension CSP');
+    assert(await page.locator('.edge-canvas').evaluate(el => {
+      const pixels=el.getContext('2d').getImageData(0,0,el.width,el.height).data;
+      return pixels.some((value,index)=>index%4===3 && value>0);
+    }),'Actual extension canvas draws edges');
     assert.deepEqual(errors,[],'Extension console/page errors');
     console.log('PASS real MV3 extension: unpacked install, service-worker import/local storage, period control, graph/ranking, local bubble loading, CSP/console smoke');
   } finally { await context.close(); }
