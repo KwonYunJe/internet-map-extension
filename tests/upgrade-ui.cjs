@@ -73,10 +73,15 @@ const assert = require('node:assert/strict');
         const detail=document.querySelector('#detail').getBoundingClientRect();
         const ranking=document.querySelector('#ranking').getBoundingClientRect();
         const desktop=innerWidth>=1100;
+        const tablet=innerWidth>=700 && innerWidth<1100;
+        const mobile=innerWidth<700;
+        const noHorizontalOverflow=document.documentElement.scrollWidth<=innerWidth+1;
+        const verticalFits=document.documentElement.scrollHeight<=innerHeight+1;
         return map.height>0 && Math.abs(map.height-pane.height)<2 &&
-          map.bottom<=innerHeight+1 &&
-          document.documentElement.scrollHeight<=innerHeight+1 &&
-          document.documentElement.scrollWidth<=innerWidth+1 &&
+          noHorizontalOverflow &&
+          (!mobile || document.documentElement.scrollHeight<=2400) &&
+          (mobile || verticalFits) &&
+          (!tablet || (map.bottom<=detail.top+1 && map.bottom<=ranking.top+1)) &&
           (!desktop || (Math.abs(map.top-detail.top)<2 && Math.abs(map.bottom-detail.bottom)<2 &&
             Math.abs(map.bottom-ranking.bottom)<2));
       }), 'Viewport-fit map/panels without page overflow at '+width+'x'+height);
@@ -124,24 +129,22 @@ const assert = require('node:assert/strict');
       await applyFaviconContrast(favicon,original);
       return hasGlow && noGlow && staleIgnored;
     }), 'Dark favicon silhouette glow, transparent exclusion, bright and stale URL guards');
-    assert(await page.locator('.edge-line').first().isVisible());
-    assert(!(await page.locator('.edge-ribbon').first().isVisible()));
     assert(await page.evaluate(()=>{
-      const widths=[1,2,10,100,100000].map(calculateSimpleEdgeWidth);
+      const ribbon=document.querySelector('.edge-ribbon[data-direction]');
+      return ribbon && ribbon.getAttribute('d') && getComputedStyle(ribbon).display!=='none';
+    }), 'Overview must render directional tapered edge paths');
+    assert(await page.evaluate(()=>{
+      const widths=[1,2,10,100,100000].map(calculateDirectionalEdgeStartWidth);
       const a={screenX:0,screenY:0,screenRadius:10};
       const b={screenX:100,screenY:0,screenRadius:20};
-      return widths[0]===0.8 && widths.every((v,i)=>v<=2.2 && (!i||v>=widths[i-1])) &&
-        createSimpleEdgePath(a,b)==='M 10 0 L 80 0' &&
-        createSimpleEdgePath(a,{...b,screenX:20})==='' &&
+      return widths.every((v,i)=>v<=18 && (!i||v>=widths[i-1])) &&
+        createTaperedRibbonPath(a,b,8,3).startsWith('M ') &&
+        createTaperedRibbonPath(a,{...b,screenX:20},8,3)==='' &&
         createEdgePairs([{source:'a',target:'b',count:2},{source:'b',target:'a',count:3}]).length===1;
     }));
-    const overviewLine=page.locator('.edge-line').first();
-    assert.equal(await overviewLine.evaluate(el=>getComputedStyle(el).strokeWidth),'0.8px');
-    const hoverBox=await page.locator('.node-hover-rim').first().boundingBox();
+    const hoverBox=await page.locator('.node-bubble').first().boundingBox();
     await page.mouse.move(hoverBox.x+hoverBox.width/2,hoverBox.y+hoverBox.height/2);
-    await page.waitForFunction(()=>document.querySelector('.edge-hovered .edge-line') &&
-      Number(getComputedStyle(document.querySelector('.edge-hovered .edge-line')).strokeOpacity)>0.85);
-    assert(!(await page.locator('.edge-ribbon').first().isVisible()), 'Hover must not enable glue');
+    await page.waitForFunction(()=>document.querySelector('.edge-hovered .edge-ribbon[data-direction]'));
     await page.mouse.move(10,10);
     await page.waitForFunction(()=>!document.querySelector('.edge-hovered'));
     assert((await page.locator('#periodComparison').textContent()).includes('beta.test'));
@@ -250,50 +253,20 @@ const assert = require('node:assert/strict');
     await page.keyboard.press('Escape');
     await page.locator('.ranking-item').first().click();
     assert.equal(await page.locator('.node-group.is-selected').count(),1);
-    assert(await page.locator('.edge-highlight .edge-ribbon').first().isVisible());
-    assert(!(await page.locator('.edge-highlight .edge-line').first().isVisible()));
-    assert.equal(await page.locator('.edge-highlight .edge-ribbon').first().evaluate(el=>getComputedStyle(el).fill),'none');
-    assert.equal(await page.locator('.edge-highlight .edge-ribbon').first().evaluate(el=>getComputedStyle(el).fillOpacity),'1');
-    assert.equal(await page.locator('.edge-highlight .edge-ribbon').first().evaluate(el=>getComputedStyle(el).stroke),'none');
+    assert(await page.evaluate(()=>{
+      const ribbon=document.querySelector('.edge-highlight .edge-ribbon[data-direction]');
+      return ribbon && ribbon.getAttribute('d') && getComputedStyle(ribbon).display!=='none';
+    }));
+    assert.equal(await page.locator('.edge-highlight .edge-glass:visible').count(),0, 'Selection must not use the old glass bridge');
+    assert.equal(await page.locator('.edge-highlight .edge-glass-shadow:visible').count(),0, 'Selection must not use the old bridge shadow');
     assert.equal(await page.locator('.node-refracted-background').count(),2);
-    assert((await page.locator('.node-bubble').first().getAttribute('href')).includes('bubble-clean.png'));
+    assert(await page.evaluate(()=>[...document.querySelectorAll('.node-bubble')].every(image=>/soap-bubble-0[1-5]\.png/.test(image.getAttribute('href')))));
     assert(await page.evaluate(()=>Math.abs(lensSample(0.001)/0.001-0.5)<0.001 && (lensSample(1)-lensSample(0.999))/0.001>1.8));
-    const refraction = page.locator('.edge-highlight .edge-refracted-background').first();
-    assert(await refraction.isVisible());
-    for (const attribute of ['href','x','y','width','height','preserveAspectRatio']) {
-      assert.equal(await refraction.getAttribute(attribute),await page.locator('.map-background').getAttribute(attribute));
-    }
-    assert(Number(await page.locator('filter[id^="edge-refraction-"] feDisplacementMap').first().getAttribute('scale')) > 0);
-    const rim = page.locator('.node-group.is-selected .node-hover-rim');
-    const rimBox = await rim.boundingBox();
-    await page.mouse.move(rimBox.x+rimBox.width/2,rimBox.y+rimBox.height/2);
-    await page.waitForFunction(()=>document.querySelector('.node-group.is-hovered .node-hover-rim') && Number(getComputedStyle(document.querySelector('.node-group.is-hovered .node-hover-rim')).opacity)>0.8);
-    // The field and filter viewport must stay fixed while the lens moves.
-    assert(await page.evaluate(async()=>{
-      const filters=[...document.querySelectorAll('filter[id$="-filter"]')].filter(el=>el.querySelector('feDisplacementMap'));
-      const snapshot=()=>filters.map(el=>[
-        ...['x','y','width','height'].map(name=>el.getAttribute(name)),
-        el.querySelector('feImage').getAttribute('href')
-      ]);
-      const before=JSON.stringify(snapshot());
-      const group=document.querySelector('.edge-highlight .edge-glass');
-      const transform=group.getAttribute('transform');
-      for(let i=0;i<24;i++) await new Promise(requestAnimationFrame);
-      return before===JSON.stringify(snapshot()) && group.getAttribute('transform')!==transform &&
-        filters.every(el=>el.getAttribute('width')==='1' && el.getAttribute('height')==='1');
-    }), 'Moving lenses must retain their optical fields and normalized filter viewport');
-    assert(await page.locator('.edge-highlight .edge-glass-shadow').isVisible());
-    // Freeze node motion and compare actual pixels with/without the lens.
-    await page.evaluate(()=>cancelAnimationFrame(animationFrameId));
-    const lensOn = await page.locator('#network').screenshot();
-    const saved = await refraction.evaluate(el=>{
-      const value=el.parentElement.getAttribute('filter');
-      el.parentElement.removeAttribute('filter');return value;
-    });
-    const lensOff = await page.locator('#network').screenshot();
-    assert(!lensOn.equals(lensOff),'Refraction must visibly change rendered pixels');
-    await refraction.evaluate((el,value)=>el.parentElement.setAttribute('filter',value),saved);
-    if (process.env.MAP_SCREENSHOT) await page.screenshot({path:process.env.MAP_SCREENSHOT.replace('.png','-gel.png'),fullPage:true});
+    const selectedBubble = page.locator('.node-group.is-selected .node-bubble');
+    const selectedBox = await selectedBubble.boundingBox();
+    await page.mouse.move(selectedBox.x+selectedBox.width/2,selectedBox.y+selectedBox.height/2);
+    await page.waitForFunction(()=>document.querySelector('.node-group.is-hovered .node-hover-glow') && Number(getComputedStyle(document.querySelector('.node-group.is-hovered .node-hover-glow')).opacity)>0.5);
+    if (process.env.MAP_SCREENSHOT) await page.screenshot({path:process.env.MAP_SCREENSHOT.replace('.png','-selected.png'),fullPage:true});
     await page.locator('[data-period="7days"]').click();
     await page.waitForFunction(()=>document.querySelector('[data-period="7days"]').getAttribute('aria-pressed')==='true');
     await page.locator('.data-settings summary').click();

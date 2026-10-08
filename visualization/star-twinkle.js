@@ -6,11 +6,11 @@
 // sync. Each group is pre-rendered into one transparent bitmap, so the map
 // only animates the opacity of a handful of images instead of thousands of
 // vector shapes.
-const STAR_TWINKLE_GROUPS = 12;
-const STAR_DIM_GROUPS = 6;
+const STAR_TWINKLE_GROUPS = 3;
+const STAR_DIM_GROUPS = 1;
 const STAR_MIN_LUMA = 120;
 const STAR_MIN_CONTRAST = 55;
-const STAR_MAX_COUNT = 2600;
+const STAR_MAX_COUNT = 24;
 let starFieldPromise = null;
 
 function detectBackgroundStars() {
@@ -146,7 +146,7 @@ function renderStarGroupImages(field) {
       const duration = random(minDuration, maxDuration);
       return { url: await toUrl(canvas), className, duration, delay: -random(0, duration) };
     }));
-    const groups = [...await describe(dims, "star-dim", 3.5, 9), ...await describe(sparkles, "star-sparkle", 2.6, 8.5)];
+    const groups = [...await describe(dims, "star-dim", 18, 30), ...await describe(sparkles, "star-sparkle", 16, 28)];
     return groups.filter(group => group.url);
   })();
 }
